@@ -1,0 +1,11 @@
+order_id,customer,country,category,amount,quantity,order_date
+1001,Asha Rao,IN,books,250.50,2,2026-10-01
+1002,  john smith ,us,Electronics,1200,1,2026-10-01
+1003,Mei Lin,CN,books,abc,1,2026-10-02
+1004,,IN,toys,99.99,3,2026-10-02
+1005,Carlos Diaz,MX,electronics,450.00,-1,2026-10-03
+1006,Priya Nair,in,Toys,35.5,4,2026-10-03
+1007,Liam Brown,GB,books,18.25,1,2026-13-45
+1008,Sara Ali,AE,electronics,799.99,2,2026-10-04
+1009,Tom Lee,US,books
+1010,Ana Silva,BR,garden,60,1,2026-10-05

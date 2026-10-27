@@ -1,0 +1,48 @@
+[
+  {
+    "order_id": 2001,
+    "customer": "Kenji Sato",
+    "country": "JP",
+    "category": "electronics",
+    "amount": 320.0,
+    "quantity": 1,
+    "order_date": "2026-10-02"
+  },
+  {
+    "order_id": 2002,
+    "customer": "Fatima Khan",
+    "country": "ae",
+    "category": "Books",
+    "amount": "12.00",
+    "quantity": 5,
+    "order_date": "2026-10-03"
+  },
+  {
+    "order_id": 2003,
+    "customer": "Noah Weber",
+    "country": "DE",
+    "category": "toys",
+    "amount": null,
+    "quantity": 2,
+    "order_date": "2026-10-03"
+  },
+  {
+    "order_id": 2004,
+    "customer": "Olivia Martin",
+    "country": "FR",
+    "category": "books",
+    "amount": 45.75,
+    "quantity": 2.5,
+    "order_date": "2026-10-04"
+  },
+  {
+    "order_id": 2005,
+    "customer": "Ravi Kumar",
+    "country": "IN",
+    "category": "electronics",
+    "amount": 899.0,
+    "quantity": 1,
+    "order_date": "2026-10-04",
+    "coupon": "DIWALI"
+  }
+]
