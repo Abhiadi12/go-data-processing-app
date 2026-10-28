@@ -15,7 +15,7 @@ var (
 	ErrNotBool   = errors.New("not a boolean")
 )
 
-//INFO: ToFloat converts strings and JSON/Go numeric values to float64.
+// INFO: ToFloat converts strings and JSON/Go numeric values to float64.
 func ToFloat(v any) (float64, error) {
 	switch x := v.(type) {
 	case float64:
@@ -41,7 +41,7 @@ func ToFloat(v any) (float64, error) {
 	}
 }
 
-//INFO: ToInt converts strings and numeric values to int64. Floats must be whole numbers.
+// INFO: ToInt converts strings and numeric values to int64. Floats must be whole numbers.
 func ToInt(v any) (int64, error) {
 	switch x := v.(type) {
 	case int:
@@ -70,7 +70,7 @@ func ToInt(v any) (int64, error) {
 	}
 }
 
-//INFO: ToBool accepts true/false, yes/no, 1/0 (case-insensitive) and JSON booleans.
+// INFO: ToBool accepts true/false, yes/no, 1/0 (case-insensitive) and JSON booleans.
 func ToBool(v any) (bool, error) {
 	switch x := v.(type) {
 	case bool:

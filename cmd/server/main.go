@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"datapipe/internal/api"
+	"github.com/Abhiadi12/go-data-processing-app/internal/api"
 )
 
 func main() {

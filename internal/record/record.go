@@ -1,4 +1,5 @@
 package record
+
 // INFO: recoreds represent a single row of data in the pipeline. Each record has a source, an index, and a set of fields that can be accessed by name. The fields are stored as a map of string to any type, allowing for flexible data representation.
 type Record struct {
 	Source string
