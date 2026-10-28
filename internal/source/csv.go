@@ -8,11 +8,14 @@ import (
 	"io"
 	"os"
 	"strings"
+
+	"github.com/Abhiadi12/go-data-processing-app/internal/record"
 )
 
 var (
-	ErrNoHeader  = errors.New("csv has no header row")
-	ErrBadHeader = errors.New("invalid csv header")
+	ErrNoHeader      = errors.New("csv has no header row")
+	ErrBadHeader     = errors.New("invalid csv header")
+	ErrTooManyFields = errors.New("row has more fields than the header")
 )
 
 var _ Source = (*CSVSource)(nil)
@@ -53,7 +56,46 @@ func (s *CSVSource) Read(ctx context.Context, emit Emit) error {
 		return fmt.Errorf("source %s: %w", s.name, err)
 	}
 
-	return nil
+	return s.readRows(ctx, r, header, emit)
+}
+
+func (s *CSVSource) readRows(ctx context.Context, r *csv.Reader, header []string, emit Emit) error {
+	for index := 1; ; index++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("source %s: %w", s.name, err)
+		}
+
+		row, err := r.Read()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+
+		var item Item
+		var parseErr *csv.ParseError
+		switch {
+		case errors.As(err, &parseErr):
+			item.Err = &RowError{Source: s.name, Index: index, Err: err}
+		case err != nil:
+			return fmt.Errorf("source %s: row %d: %w", s.name, index, err)
+		case len(row) > len(header):
+			item.Err = &RowError{Source: s.name, Index: index,
+				Err: fmt.Errorf("%w: got %d, want %d", ErrTooManyFields, len(row), len(header))}
+		default:
+			item.Record = toRecord(s.name, index, header, row)
+		}
+
+		if err := emit(item); err != nil {
+			return err
+		}
+	}
+}
+
+func toRecord(source string, index int, header, row []string) record.Record {
+	rec := record.New(source, index)
+	for i, value := range row {
+		rec.Fields[header[i]] = value
+	}
+	return rec
 }
 
 func cleanHeader(header []string) ([]string, error) {
