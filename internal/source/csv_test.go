@@ -173,3 +173,43 @@ func TestCSVStopsWhenEmitFails(t *testing.T) {
 		t.Fatalf("emitted %d items, want 1", got)
 	}
 }
+
+func TestCSVSampleFile(t *testing.T) {
+	path := filepath.Join("..", "..", "testdata", "orders.csv")
+	items, err := readAll(t, NewCSV("orders-csv", path))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(items) != 10 {
+		t.Fatalf("got %d items, want 10", len(items))
+	}
+
+	for i, it := range items {
+		if it.Err != nil {
+			t.Errorf("row %d: unexpected row error: %v", i+1, it.Err)
+		}
+		if it.Record.Source != "orders-csv" || it.Record.Index != i+1 {
+			t.Errorf("row %d: source %q index %d", i+1, it.Record.Source, it.Record.Index)
+		}
+	}
+
+	first := map[string]any{
+		"order_id": "1001", "customer": "Asha Rao", "country": "IN", "category": "books",
+		"amount": "250.50", "quantity": "2", "order_date": "2026-10-01",
+	}
+	if !reflect.DeepEqual(items[0].Record.Fields, first) {
+		t.Errorf("row 1 = %v, want %v", items[0].Record.Fields, first)
+	}
+
+	if v, ok := items[3].Record.Get("customer"); !ok || v != "" {
+		t.Errorf("row 4 customer = %q (present: %v), want empty but present", v, ok)
+	}
+
+	short := items[8].Record
+	if len(short.Fields) != 4 {
+		t.Errorf("row 9 has %d fields, want 4", len(short.Fields))
+	}
+	if _, ok := short.Get("quantity"); ok {
+		t.Error("row 9 should have no quantity field")
+	}
+}

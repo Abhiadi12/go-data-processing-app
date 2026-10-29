@@ -1,0 +1,17 @@
+#!/bin/sh
+# Checks the first line of the commit message against Conventional Commits.
+# Examples: "feat: add json source", "fix(api): return 404 for unknown job"
+
+first_line=$(head -n 1 "$1")
+
+case "$first_line" in
+Merge* | Revert* | fixup!* | squash!*) exit 0 ;;
+esac
+
+pattern='^(feat|fix|docs|test|refactor|perf|chore|ci|build|style|revert)(\([a-z0-9-]+\))?!?: .+'
+if ! echo "$first_line" | grep -Eq "$pattern"; then
+	echo "commit-msg: \"$first_line\" is not a Conventional Commit."
+	echo "Use: <type>(optional scope): <summary>"
+	echo "Types: feat fix docs test refactor perf chore ci build style revert"
+	exit 1
+fi
