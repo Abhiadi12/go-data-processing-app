@@ -1,0 +1,13 @@
+#!/bin/sh
+# Runs before every commit. Skip once with: git commit --no-verify
+set -e
+
+unformatted=$(gofmt -l .)
+if [ -n "$unformatted" ]; then
+	echo "pre-commit: these files need gofmt (run: gofmt -w .):"
+	echo "$unformatted"
+	exit 1
+fi
+
+go vet ./...
+go test -count=1 ./...
