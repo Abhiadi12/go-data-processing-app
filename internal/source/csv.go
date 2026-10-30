@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"io/fs"
 	"strings"
 
 	"github.com/Abhiadi12/go-data-processing-app/internal/record"
@@ -21,12 +21,15 @@ var (
 var _ Source = (*CSVSource)(nil)
 
 type CSVSource struct {
-	name string
-	path string
+	name  string
+	files fs.FS
+	path  string
 }
 
-func NewCSV(name, path string) *CSVSource {
-	return &CSVSource{name: name, path: path}
+// NewCSV reads path from files. In production files is os.Root.FS() for DATA_DIR,
+// so a path cannot escape the data directory.
+func NewCSV(name string, files fs.FS, path string) *CSVSource {
+	return &CSVSource{name: name, files: files, path: path}
 }
 
 func (s *CSVSource) Name() string {
@@ -34,7 +37,7 @@ func (s *CSVSource) Name() string {
 }
 
 func (s *CSVSource) Read(ctx context.Context, emit Emit) error {
-	f, err := os.Open(s.path)
+	f, err := s.files.Open(s.path)
 	if err != nil {
 		return fmt.Errorf("source %s: %w", s.name, err)
 	}
