@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"testing/fstest"
 )
 
 func TestJSONFatalErrors(t *testing.T) {
@@ -25,7 +27,7 @@ func TestJSONFatalErrors(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := readAll(t, NewJSON("test", writeFile(t, "in.json", tc.content)))
+			_, err := readAll(t, newJSON("test", tc.content))
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tc.wantErr)
 			}
@@ -34,14 +36,14 @@ func TestJSONFatalErrors(t *testing.T) {
 }
 
 func TestJSONMissingFile(t *testing.T) {
-	_, err := readAll(t, NewJSON("test", "does/not/exist.json"))
+	_, err := readAll(t, NewJSON("test", fstest.MapFS{}, "does/not/exist.json", ""))
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("err = %v, want fs.ErrNotExist", err)
 	}
 }
 
 func TestJSONEmptyArray(t *testing.T) {
-	items, err := readAll(t, NewJSON("test", writeFile(t, "in.json", " [ ] \n")))
+	items, err := readAll(t, newJSON("test", " [ ] \n"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -59,7 +61,7 @@ func TestJSONReadsElements(t *testing.T) {
 		{"id": 2}
 	]`
 
-	items, err := readAll(t, NewJSON("orders", writeFile(t, "in.json", content)))
+	items, err := readAll(t, newJSON("orders", content))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -93,7 +95,7 @@ func TestJSONReadsElements(t *testing.T) {
 func TestJSONSyntaxErrorStopsReading(t *testing.T) {
 	content := `[{"id": 1}, {"id": oops}, {"id": 3}]`
 
-	items, err := readAll(t, NewJSON("orders", writeFile(t, "in.json", content)))
+	items, err := readAll(t, newJSON("orders", content))
 
 	var syntaxErr *json.SyntaxError
 	if !errors.As(err, &syntaxErr) {
@@ -114,7 +116,7 @@ func TestJSONTruncatedInput(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			items, err := readAll(t, NewJSON("test", writeFile(t, "in.json", tc.content)))
+			items, err := readAll(t, newJSON("test", tc.content))
 			if err == nil {
 				t.Fatal("want an error for truncated input, got nil")
 			}
@@ -126,12 +128,12 @@ func TestJSONTruncatedInput(t *testing.T) {
 }
 
 func TestJSONStopsWhenCancelled(t *testing.T) {
-	path := writeFile(t, "in.json", `[{"id":1},{"id":2},{"id":3}]`)
+	src := newJSON("orders", `[{"id":1},{"id":2},{"id":3}]`)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	var got int
-	err := NewJSON("orders", path).Read(ctx, func(Item) error {
+	err := src.Read(ctx, func(Item) error {
 		got++
 		cancel()
 		return nil
@@ -146,11 +148,11 @@ func TestJSONStopsWhenCancelled(t *testing.T) {
 }
 
 func TestJSONStopsWhenEmitFails(t *testing.T) {
-	path := writeFile(t, "in.json", `[{"id":1},{"id":2},{"id":3}]`)
+	src := newJSON("orders", `[{"id":1},{"id":2},{"id":3}]`)
 	errStop := errors.New("stop")
 
 	var got int
-	err := NewJSON("orders", path).Read(context.Background(), func(Item) error {
+	err := src.Read(context.Background(), func(Item) error {
 		got++
 		return errStop
 	})
@@ -164,8 +166,8 @@ func TestJSONStopsWhenEmitFails(t *testing.T) {
 }
 
 func TestJSONSampleFile(t *testing.T) {
-	path := filepath.Join("..", "..", "testdata", "orders.json")
-	items, err := readAll(t, NewJSON("orders-json", path))
+	files := os.DirFS(filepath.Join("..", "..", "testdata"))
+	items, err := readAll(t, NewJSON("orders-json", files, "orders.json", ""))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

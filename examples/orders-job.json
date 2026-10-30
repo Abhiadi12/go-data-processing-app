@@ -1,0 +1,59 @@
+{
+  "name": "daily-orders",
+  "sources": [
+    { "name": "orders-csv", "type": "csv", "path": "testdata/orders.csv" },
+    { "name": "orders-json", "type": "json", "path": "testdata/orders.json" }
+  ],
+  "schema": {
+    "fields": [
+      { "name": "order_id", "type": "int", "required": true, "min": 1 },
+      { "name": "customer", "type": "string", "required": true },
+      { "name": "country", "type": "string", "required": true, "pattern": "^[A-Za-z]{2}$" },
+      { "name": "category", "type": "string", "required": true, "allowed": ["books", "electronics", "toys"] },
+      { "name": "amount", "type": "float", "required": true, "min": 0 },
+      { "name": "quantity", "type": "int", "required": true, "min": 1 },
+      { "name": "order_date", "type": "date", "required": true, "format": "2006-01-02" }
+    ],
+    "unknown_fields": "drop"
+  },
+  "transforms": [
+    { "op": "trim", "fields": ["customer", "country", "category"] },
+    { "op": "title", "fields": ["customer"] },
+    { "op": "uppercase", "fields": ["country"] },
+    { "op": "lowercase", "fields": ["category"] },
+    { "op": "multiply", "fields": ["amount", "quantity"], "target": "total" },
+    {
+      "op": "lookup", "field": "country", "target": "region",
+      "table": {
+        "IN": "APAC", "JP": "APAC", "CN": "APAC", "US": "AMER", "MX": "AMER",
+        "BR": "AMER", "GB": "EMEA", "DE": "EMEA", "FR": "EMEA", "AE": "EMEA"
+      },
+      "default": "OTHER"
+    }
+  ],
+  "aggregations": [
+    {
+      "name": "by_category", "group_by": ["category"],
+      "metrics": [
+        { "op": "count" }, { "op": "sum", "field": "total" },
+        { "op": "avg", "field": "amount" }, { "op": "min", "field": "amount" },
+        { "op": "max", "field": "amount" }
+      ]
+    },
+    { "name": "by_region", "group_by": ["region"], "metrics": [{ "op": "count" }, { "op": "sum", "field": "total" }] },
+    { "name": "overall", "group_by": [], "metrics": [{ "op": "count" }, { "op": "sum", "field": "total" }] }
+  ],
+  "exports": [
+    { "type": "json", "content": "records" },
+    { "type": "csv", "content": "records" },
+    { "type": "json", "content": "aggregates" }
+  ],
+  "options": {
+    "validate_workers": 4,
+    "transform_workers": 4,
+    "buffer_size": 100,
+    "timeout_seconds": 60,
+    "max_stored_errors": 1000,
+    "continue_on_source_error": false
+  }
+}
