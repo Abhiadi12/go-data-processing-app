@@ -19,6 +19,10 @@ type Store interface {
 	Create(ctx context.Context, j Job) error
 	Get(ctx context.Context, id string) (Job, error)
 	List(ctx context.Context) ([]Job, error)
+	// Update runs fn on the stored job under the store's lock and saves the result,
+	// so a read-check-write (e.g. "only start if still pending") cannot race.
+	// If fn returns an error nothing is saved and that error is returned.
+	Update(ctx context.Context, id string, fn func(*Job) error) (Job, error)
 }
 
 var _ Store = (*MemoryStore)(nil)
@@ -53,6 +57,21 @@ func (s *MemoryStore) Get(_ context.Context, id string) (Job, error) {
 	if !ok {
 		return Job{}, ErrNotFound
 	}
+	return j, nil
+}
+
+func (s *MemoryStore) Update(_ context.Context, id string, fn func(*Job) error) (Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	j, ok := s.jobs[id]
+	if !ok {
+		return Job{}, ErrNotFound
+	}
+	if err := fn(&j); err != nil {
+		return Job{}, err
+	}
+	s.jobs[id] = j
 	return j, nil
 }
 

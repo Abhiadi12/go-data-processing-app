@@ -22,6 +22,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.DataDir != "." || cfg.MaxBodyBytes != 1<<20 || cfg.AllowPrivateSources {
 		t.Errorf("got data dir %q body %d private %v", cfg.DataDir, cfg.MaxBodyBytes, cfg.AllowPrivateSources)
 	}
+	if cfg.JobWorkers != 2 || cfg.JobQueueSize != 100 {
+		t.Errorf("got job workers %d queue %d", cfg.JobWorkers, cfg.JobQueueSize)
+	}
 	if cfg.ReadTimeout != 15*time.Second || cfg.ShutdownTimeout != 10*time.Second {
 		t.Errorf("got read %v shutdown %v", cfg.ReadTimeout, cfg.ShutdownTimeout)
 	}
@@ -36,6 +39,7 @@ func TestLoadOverrides(t *testing.T) {
 		"DATA_DIR":              dir,
 		"MAX_BODY_BYTES":        "2048",
 		"WRITE_TIMEOUT":         "1m",
+		"JOB_WORKERS":           "8",
 		"ALLOW_PRIVATE_SOURCES": "true",
 	}))
 	if err != nil {
@@ -44,7 +48,7 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.Port != "8081" || cfg.LogLevel != slog.LevelDebug || cfg.LogFormat != "text" {
 		t.Errorf("got port %q level %v format %q", cfg.Port, cfg.LogLevel, cfg.LogFormat)
 	}
-	if cfg.DataDir != dir || cfg.MaxBodyBytes != 2048 || cfg.WriteTimeout != time.Minute || !cfg.AllowPrivateSources {
+	if cfg.DataDir != dir || cfg.MaxBodyBytes != 2048 || cfg.WriteTimeout != time.Minute || !cfg.AllowPrivateSources || cfg.JobWorkers != 8 {
 		t.Errorf("got %+v", cfg)
 	}
 }
@@ -58,11 +62,13 @@ func TestLoadReportsEveryProblem(t *testing.T) {
 		"MAX_BODY_BYTES":        "-1",
 		"READ_TIMEOUT":          "soon",
 		"ALLOW_PRIVATE_SOURCES": "maybe",
+		"JOB_WORKERS":           "0",
+		"JOB_QUEUE_SIZE":        "lots",
 	}))
 	if err == nil {
 		t.Fatal("want an error, got nil")
 	}
-	for _, key := range []string{"PORT", "LOG_LEVEL", "LOG_FORMAT", "DATA_DIR", "MAX_BODY_BYTES", "READ_TIMEOUT", "ALLOW_PRIVATE_SOURCES"} {
+	for _, key := range []string{"PORT", "LOG_LEVEL", "LOG_FORMAT", "DATA_DIR", "MAX_BODY_BYTES", "READ_TIMEOUT", "ALLOW_PRIVATE_SOURCES", "JOB_WORKERS", "JOB_QUEUE_SIZE"} {
 		if !strings.Contains(err.Error(), key+"=") {
 			t.Errorf("error does not mention %s:\n%v", key, err)
 		}
