@@ -138,6 +138,16 @@ func TestValidateProblems(t *testing.T) {
 		{"buffer too big", func(s *Spec) { s.Options.BufferSize = 5001 }, "options.buffer_size"},
 		{"timeout too long", func(s *Spec) { s.Options.TimeoutSeconds = 3601 }, "options.timeout_seconds"},
 		{"too many stored errors", func(s *Spec) { s.Options.MaxStoredErrors = 100001 }, "options.max_stored_errors"},
+		{"transform uses unknown field", func(s *Spec) { s.Transforms[0].Fields = []string{"countr"} }, "transforms[0].fields[0]"},
+		{"field used before it is created", func(s *Spec) { s.Transforms[0].Fields = []string{"total"} }, "transforms[0].fields[0]"},
+		{"field used after rename", func(s *Spec) {
+			s.Transforms = []Transform{{Op: "rename", From: "country", To: "cc"}, {Op: "trim", Fields: []string{"country"}}}
+		}, "transforms[1].fields[0]"},
+		{"lookup on unknown field", func(s *Spec) {
+			s.Transforms[0] = Transform{Op: "lookup", Field: "cntry", Target: "region", Table: map[string]string{"IN": "APAC"}}
+		}, "transforms[0].field"},
+		{"metric on unknown field", func(s *Spec) { s.Aggregations[0].Metrics[1].Field = "amt" }, "aggregations[0].metrics[1].field"},
+		{"group_by unknown field", func(s *Spec) { s.Aggregations[0].GroupBy = []string{"region"} }, "aggregations[0].group_by[0]"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -206,5 +216,32 @@ func TestExampleSpecFile(t *testing.T) {
 	if len(s.Sources) != 2 || len(s.Transforms) != 6 || len(s.Aggregations) != 3 || len(s.Exports) != 3 {
 		t.Errorf("unexpected shape: %d sources, %d transforms, %d aggregations, %d exports",
 			len(s.Sources), len(s.Transforms), len(s.Aggregations), len(s.Exports))
+	}
+}
+
+func TestFieldReferencesAllowCreatedFields(t *testing.T) {
+	s := validSpec()
+	s.Transforms = append(s.Transforms,
+		Transform{Op: "lookup", Field: "country", Target: "region", Table: map[string]string{"IN": "APAC"}},
+		Transform{Op: "default", Field: "channel", Value: "web"},
+		Transform{Op: "rename", From: "channel", To: "source_channel"},
+	)
+	s.Aggregations[0].GroupBy = []string{"region", "source_channel"}
+	s.Aggregations[0].Metrics = []Metric{{Op: "sum", Field: "total"}}
+	s.ApplyDefaults()
+
+	if err := s.Validate(testFiles); err != nil {
+		t.Fatalf("fields created by transforms should be usable: %v", err)
+	}
+}
+
+func TestFieldReferencesSkippedWhenKeepingUnknownFields(t *testing.T) {
+	s := validSpec()
+	s.Schema.UnknownFields = UnknownFieldsKeep
+	s.Aggregations[0].GroupBy = []string{"coupon"}
+	s.ApplyDefaults()
+
+	if err := s.Validate(testFiles); err != nil {
+		t.Fatalf("with unknown_fields keep any field may exist: %v", err)
 	}
 }

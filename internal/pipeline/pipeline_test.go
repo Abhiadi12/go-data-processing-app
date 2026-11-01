@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -17,7 +18,6 @@ import (
 	"github.com/Abhiadi12/go-data-processing-app/internal/source"
 )
 
-// fakeSource lets a test decide exactly what a source does.
 type fakeSource struct {
 	name string
 	read func(ctx context.Context, emit source.Emit) error
@@ -95,7 +95,8 @@ func TestRunSampleFiles(t *testing.T) {
 
 	var c Counters
 	errs := NewErrors(100)
-	if err := Run(context.Background(), spec, srcs, &c, errs); err != nil {
+	res, err := Run(context.Background(), spec, srcs, &c, errs)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -122,6 +123,35 @@ func TestRunSampleFiles(t *testing.T) {
 			t.Errorf("missing failure %q in\n%s", want, strings.Join(failed, "\n"))
 		}
 	}
+
+	checkSampleAggregates(t, res.Aggregates)
+}
+
+func checkSampleAggregates(t *testing.T, got []job.AggregateResult) {
+	t.Helper()
+	group := func(cat string, m map[string]float64) job.GroupResult {
+		return job.GroupResult{Key: map[string]any{"category": cat}, Metrics: m}
+	}
+	region := func(r string, count, sum float64) job.GroupResult {
+		return job.GroupResult{Key: map[string]any{"region": r}, Metrics: map[string]float64{"count": count, "sum_total": sum}}
+	}
+	want := []job.AggregateResult{
+		{Name: "by_category", GroupBy: []string{"category"}, Groups: []job.GroupResult{
+			group("books", map[string]float64{"count": 2, "sum_total": 561, "avg_amount": 131.25, "min_amount": 12, "max_amount": 250.5}),
+			group("electronics", map[string]float64{"count": 4, "sum_total": 4018.98, "avg_amount": 804.75, "min_amount": 320, "max_amount": 1200}),
+			group("toys", map[string]float64{"count": 1, "sum_total": 142, "avg_amount": 35.5, "min_amount": 35.5, "max_amount": 35.5}),
+		}},
+		{Name: "by_region", GroupBy: []string{"region"}, Groups: []job.GroupResult{
+			region("AMER", 1, 1200), region("APAC", 4, 1862), region("EMEA", 2, 1659.98),
+		}},
+		{Name: "overall", GroupBy: []string{}, Groups: []job.GroupResult{
+			{Key: map[string]any{}, Metrics: map[string]float64{"count": 7, "sum_total": 4721.98}},
+		}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		gj, _ := json.MarshalIndent(got, "", "  ")
+		t.Errorf("aggregates =\n%s", gj)
+	}
 }
 
 func TestRunSourceFailureStopsEverything(t *testing.T) {
@@ -130,7 +160,7 @@ func TestRunSourceFailureStopsEverything(t *testing.T) {
 
 	var c Counters
 	errs := NewErrors(10)
-	err := Run(context.Background(), simpleSpec(), srcs, &c, errs)
+	_, err := Run(context.Background(), simpleSpec(), srcs, &c, errs)
 
 	if !errors.Is(err, ErrSourceFailed) || !strings.Contains(err.Error(), "connection refused") {
 		t.Fatalf("err = %v, want ErrSourceFailed with the cause", err)
@@ -149,7 +179,7 @@ func TestRunContinueOnSourceError(t *testing.T) {
 	spec.Options.ContinueOnSourceError = true
 
 	var c Counters
-	err := Run(context.Background(), spec, []source.Source{failing("api"), fixed("file", 5)}, &c, NewErrors(10))
+	_, err := Run(context.Background(), spec, []source.Source{failing("api"), fixed("file", 5)}, &c, NewErrors(10))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -169,7 +199,7 @@ func TestRunStopsOnCancel(t *testing.T) {
 	}()
 
 	var c Counters
-	err := Run(ctx, simpleSpec(), []source.Source{endless("big", stopped)}, &c, NewErrors(10))
+	_, err := Run(ctx, simpleSpec(), []source.Source{endless("big", stopped)}, &c, NewErrors(10))
 	if !errors.Is(err, errUser) {
 		t.Fatalf("err = %v, want the cancel cause", err)
 	}
@@ -184,7 +214,7 @@ func TestRunStopsOnTimeout(t *testing.T) {
 	defer cancel()
 	stopped := make(chan struct{})
 
-	err := Run(ctx, simpleSpec(), []source.Source{endless("big", stopped)}, &Counters{}, NewErrors(10))
+	_, err := Run(ctx, simpleSpec(), []source.Source{endless("big", stopped)}, &Counters{}, NewErrors(10))
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want DeadlineExceeded", err)
 	}
@@ -201,7 +231,7 @@ func TestRunRowErrorsFromSources(t *testing.T) {
 
 	var c Counters
 	errs := NewErrors(10)
-	if err := Run(context.Background(), simpleSpec(), []source.Source{src}, &c, errs); err != nil {
+	if _, err := Run(context.Background(), simpleSpec(), []source.Source{src}, &c, errs); err != nil {
 		t.Fatal(err)
 	}
 	if got := c.Snapshot(); got.RecordsRead != 2 || got.RecordsValid != 1 || got.RecordsFailed != 1 {

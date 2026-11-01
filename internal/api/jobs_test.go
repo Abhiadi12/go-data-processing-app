@@ -276,3 +276,39 @@ func TestJobResponseHidesFailedRecords(t *testing.T) {
 		t.Errorf("body = %s", rec.Body.String())
 	}
 }
+
+func TestJobResults(t *testing.T) {
+	h, store := newTestServer(t, nil, &fakeRunner{})
+
+	done := job.New(job.Spec{Name: "x"}, "")
+	done.Status = job.StatusCompleted
+	done.Progress = job.Progress{RecordsRead: 3, RecordsValid: 2, RecordsFailed: 1}
+	done.Aggregates = []job.AggregateResult{{
+		Name: "overall", GroupBy: []string{},
+		Groups: []job.GroupResult{{Key: map[string]any{}, Metrics: map[string]float64{"count": 2, "sum_total": 4721.98}}},
+	}}
+	running := job.New(job.Spec{Name: "y"}, "")
+	running.Status = job.StatusRunning
+	for _, x := range []job.Job{done, running} {
+		if err := store.Create(t.Context(), x); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec := do(t, h, http.MethodGet, "/api/v1/pipelines/"+done.ID+"/results", "")
+	body := decode[resultsResponse](t, rec)
+	if rec.Code != http.StatusOK || !body.Available || body.Progress.RecordsValid != 2 ||
+		len(body.Aggregates) != 1 || body.Aggregates[0].Groups[0].Metrics["sum_total"] != 4721.98 {
+		t.Errorf("completed: status %d body %s", rec.Code, rec.Body.String())
+	}
+
+	rec = do(t, h, http.MethodGet, "/api/v1/pipelines/"+running.ID+"/results", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"available":false`) ||
+		!strings.Contains(rec.Body.String(), `"aggregates":[]`) {
+		t.Errorf("running: status %d body %s", rec.Code, rec.Body.String())
+	}
+
+	if rec := do(t, h, http.MethodGet, "/api/v1/pipelines/nope/results", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown job: status %d", rec.Code)
+	}
+}

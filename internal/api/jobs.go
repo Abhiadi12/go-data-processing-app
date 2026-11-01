@@ -200,3 +200,36 @@ func (s *server) handleJobErrors(w http.ResponseWriter, r *http.Request) {
 		Errors:   errs,
 	})
 }
+
+type resultsResponse struct {
+	JobID      string                `json:"job_id"`
+	Status     job.Status            `json:"status"`
+	Available  bool                  `json:"available"`
+	Progress   job.Progress          `json:"progress"`
+	Aggregates []job.AggregateResult `json:"aggregates"`
+}
+
+func (s *server) handleJobResults(w http.ResponseWriter, r *http.Request) {
+	j, err := s.store.Get(r.Context(), r.PathValue("id"))
+	switch {
+	case errors.Is(err, job.ErrNotFound):
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	case err != nil:
+		s.logger.ErrorContext(r.Context(), "get job results", "err", err)
+		writeError(w, http.StatusInternalServerError, "could not read the job")
+		return
+	}
+
+	aggs := j.Aggregates
+	if aggs == nil {
+		aggs = []job.AggregateResult{}
+	}
+	writeJSON(w, http.StatusOK, resultsResponse{
+		JobID:      j.ID,
+		Status:     j.Status,
+		Available:  j.Status == job.StatusCompleted,
+		Progress:   j.Progress,
+		Aggregates: aggs,
+	})
+}
