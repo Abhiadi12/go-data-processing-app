@@ -24,7 +24,34 @@ type Job struct {
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 	Error      string     `json:"error,omitempty"`
+	Progress   Progress   `json:"progress"`
 	Spec       Spec       `json:"spec"`
+
+	// FailedRecords holds the first options.max_stored_errors failures;
+	// Progress.RecordsFailed is the full count. Served by GET .../errors.
+	FailedRecords []RecordError `json:"-"`
+}
+
+// Finished reports whether the job reached a final status.
+func (j Job) Finished() bool {
+	return j.Status == StatusCompleted || j.Status == StatusFailed || j.Status == StatusCancelled
+}
+
+// Progress counts records as they move through the pipeline.
+type Progress struct {
+	RecordsRead   int64 `json:"records_read"`
+	RecordsValid  int64 `json:"records_valid"`
+	RecordsFailed int64 `json:"records_failed"`
+	SourceErrors  int64 `json:"source_errors"`
+}
+
+// RecordError describes one record that was dropped, or one source that failed (Index 0).
+type RecordError struct {
+	Source  string         `json:"source"`
+	Index   int            `json:"index,omitempty"`
+	Stage   string         `json:"stage"`
+	Reasons []string       `json:"reasons"`
+	Record  map[string]any `json:"record,omitempty"`
 }
 
 // New returns a pending job for a spec that has already been validated.

@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io/fs"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 type Options struct {
 	Logger       *slog.Logger
 	Store        job.Store
+	Runner       JobRunner
 	Files        fs.FS
 	MaxBodyBytes int64
 }
@@ -20,18 +22,27 @@ type Options struct {
 type server struct {
 	logger *slog.Logger
 	store  job.Store
+	runner JobRunner
 	files  fs.FS
+}
+
+// JobRunner runs jobs in the background (implemented by runner.Runner).
+type JobRunner interface {
+	Submit(id string) error
+	Cancel(ctx context.Context, id string) (job.Job, error)
 }
 
 // NewHandler returns the API with all routes and middleware.
 func NewHandler(opts Options) http.Handler {
-	s := &server{logger: opts.Logger, store: opts.Store, files: opts.Files}
+	s := &server{logger: opts.Logger, store: opts.Store, runner: opts.Runner, files: opts.Files}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("POST /api/v1/pipelines", s.handleCreateJob)
 	mux.HandleFunc("GET /api/v1/pipelines", s.handleListJobs)
 	mux.HandleFunc("GET /api/v1/pipelines/{id}", s.handleGetJob)
+	mux.HandleFunc("POST /api/v1/pipelines/{id}/cancel", s.handleCancelJob)
+	mux.HandleFunc("GET /api/v1/pipelines/{id}/errors", s.handleJobErrors)
 
 	return chain(mux,
 		requestID,

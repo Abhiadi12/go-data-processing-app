@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/Abhiadi12/go-data-processing-app/internal/job"
 	"github.com/Abhiadi12/go-data-processing-app/internal/logging"
+	"github.com/Abhiadi12/go-data-processing-app/internal/runner"
 )
 
 func (s *server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
@@ -45,9 +47,37 @@ func (s *server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.logger.InfoContext(logging.WithJobID(r.Context(), j.ID), "job created", "name", j.Name, "sources", len(spec.Sources))
+	ctx := logging.WithJobID(r.Context(), j.ID)
+	if err := s.runner.Submit(j.ID); err != nil {
+		s.reject(ctx, w, j.ID, err)
+		return
+	}
+
+	s.logger.InfoContext(ctx, "job queued", "name", j.Name, "sources", len(spec.Sources))
 	w.Header().Set("Location", "/api/v1/pipelines/"+j.ID)
 	writeJSON(w, http.StatusAccepted, j)
+}
+
+// reject marks a job that could not be queued as failed and answers 503,
+// so the client knows to retry later and the job is not left pending forever.
+func (s *server) reject(ctx context.Context, w http.ResponseWriter, id string, err error) {
+	msg := "job queue is full, try again later"
+	if errors.Is(err, runner.ErrStopped) {
+		msg = "server is shutting down"
+	}
+	s.logger.WarnContext(ctx, "job rejected", "err", err)
+
+	_, uerr := s.store.Update(ctx, id, func(j *job.Job) error {
+		now := time.Now().UTC()
+		j.Status, j.FinishedAt, j.Error = job.StatusFailed, &now, "rejected: "+err.Error()
+		return nil
+	})
+	if uerr != nil {
+		s.logger.ErrorContext(ctx, "mark rejected job", "err", uerr)
+	}
+
+	w.Header().Set("Retry-After", "5")
+	writeError(w, http.StatusServiceUnavailable, msg)
 }
 
 // decodeJSON reads exactly one JSON object into dst, rejecting unknown fields.
@@ -117,4 +147,56 @@ func (s *server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusOK, j)
 	}
+}
+
+func (s *server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
+	j, err := s.runner.Cancel(r.Context(), r.PathValue("id"))
+	switch {
+	case errors.Is(err, job.ErrNotFound):
+		writeError(w, http.StatusNotFound, "job not found")
+	case errors.Is(err, runner.ErrJobFinished):
+		writeError(w, http.StatusConflict, "job has already finished")
+	case err != nil:
+		s.logger.ErrorContext(r.Context(), "cancel job", "err", err)
+		writeError(w, http.StatusInternalServerError, "could not cancel the job")
+	case j.Status == job.StatusCancelled:
+		writeJSON(w, http.StatusOK, j)
+	default:
+		writeJSON(w, http.StatusAccepted, j)
+	}
+}
+
+type errorsResponse struct {
+	JobID    string            `json:"job_id"`
+	Status   job.Status        `json:"status"`
+	Total    int64             `json:"total"`
+	Stored   int               `json:"stored"`
+	Complete bool              `json:"complete"`
+	Errors   []job.RecordError `json:"errors"`
+}
+
+func (s *server) handleJobErrors(w http.ResponseWriter, r *http.Request) {
+	j, err := s.store.Get(r.Context(), r.PathValue("id"))
+	switch {
+	case errors.Is(err, job.ErrNotFound):
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	case err != nil:
+		s.logger.ErrorContext(r.Context(), "get job errors", "err", err)
+		writeError(w, http.StatusInternalServerError, "could not read the job")
+		return
+	}
+
+	errs := j.FailedRecords
+	if errs == nil {
+		errs = []job.RecordError{}
+	}
+	writeJSON(w, http.StatusOK, errorsResponse{
+		JobID:    j.ID,
+		Status:   j.Status,
+		Total:    j.Progress.RecordsFailed + j.Progress.SourceErrors,
+		Stored:   len(errs),
+		Complete: j.Finished(),
+		Errors:   errs,
+	})
 }

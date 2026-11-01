@@ -26,6 +26,9 @@ type Config struct {
 
 	AllowPrivateSources bool
 	HTTPSourceMaxBytes  int64
+
+	JobWorkers   int
+	JobQueueSize int
 }
 
 // Load reads the configuration through getenv (os.Getenv in production)
@@ -48,6 +51,9 @@ func Load(getenv func(string) string) (Config, error) {
 
 		AllowPrivateSources: l.boolean("ALLOW_PRIVATE_SOURCES", false),
 		HTTPSourceMaxBytes:  l.bytes("HTTP_SOURCE_MAX_BYTES", 50<<20),
+
+		JobWorkers:   l.count("JOB_WORKERS", 2, 64),
+		JobQueueSize: l.count("JOB_QUEUE_SIZE", 100, 10000),
 	}
 
 	if p, err := strconv.Atoi(cfg.Port); err != nil || p < 1 || p > 65535 {
@@ -121,6 +127,19 @@ func (l *loader) bytes(key string, def int64) int64 {
 	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil || n <= 0 {
 		l.fail(key, v, "must be a positive number of bytes")
+		return def
+	}
+	return n
+}
+
+func (l *loader) count(key string, def, maxValue int) int {
+	v := l.str(key, "")
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 || n > maxValue {
+		l.fail(key, v, fmt.Sprintf("must be a whole number between 1 and %d", maxValue))
 		return def
 	}
 	return n

@@ -110,3 +110,46 @@ func TestBuildSources(t *testing.T) {
 		t.Error("unknown type: want an error")
 	}
 }
+
+func TestMemoryStoreUpdate(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	j := New(validSpec(), "")
+	if err := s.Create(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Update(ctx, j.ID, func(j *Job) error {
+		j.Status = StatusRunning
+		return nil
+	})
+	if err != nil || got.Status != StatusRunning {
+		t.Fatalf("update: %+v, %v", got, err)
+	}
+
+	errNo := errors.New("no")
+	if _, err := s.Update(ctx, j.ID, func(j *Job) error {
+		j.Status = StatusFailed
+		return errNo
+	}); !errors.Is(err, errNo) {
+		t.Fatalf("err = %v, want errNo", err)
+	}
+	if stored, _ := s.Get(ctx, j.ID); stored.Status != StatusRunning {
+		t.Errorf("failed update was saved: status %s", stored.Status)
+	}
+
+	if _, err := s.Update(ctx, "missing", func(*Job) error { return nil }); !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestJobFinished(t *testing.T) {
+	for status, want := range map[Status]bool{
+		StatusPending: false, StatusRunning: false,
+		StatusCompleted: true, StatusFailed: true, StatusCancelled: true,
+	} {
+		if got := (Job{Status: status}).Finished(); got != want {
+			t.Errorf("%s: Finished() = %v, want %v", status, got, want)
+		}
+	}
+}

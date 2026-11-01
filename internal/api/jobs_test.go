@@ -1,11 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/Abhiadi12/go-data-processing-app/internal/job"
+	"github.com/Abhiadi12/go-data-processing-app/internal/runner"
 )
 
 const validBody = `{
@@ -143,5 +148,131 @@ func TestInvalidSpecListsEveryProblem(t *testing.T) {
 		if !fields[want] {
 			t.Errorf("no problem reported for %s: %+v", want, body.Details)
 		}
+	}
+}
+
+func TestCreateSubmitsJobToRunner(t *testing.T) {
+	fr := &fakeRunner{}
+	h, _ := newTestServer(t, nil, fr)
+
+	rec := do(t, h, http.MethodPost, "/api/v1/pipelines", validBody)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	id := decode[jobResponse](t, rec).ID
+	if len(fr.submitted) != 1 || fr.submitted[0] != id {
+		t.Errorf("submitted %v, want [%s]", fr.submitted, id)
+	}
+}
+
+func TestCreateRejectedByRunner(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		wantMsg string
+	}{
+		{"queue full", runner.ErrQueueFull, "job queue is full"},
+		{"shutting down", runner.ErrStopped, "server is shutting down"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h, store := newTestServer(t, nil, &fakeRunner{submitErr: tc.err})
+
+			rec := do(t, h, http.MethodPost, "/api/v1/pipelines", validBody)
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), tc.wantMsg) {
+				t.Fatalf("status %d body %s", rec.Code, rec.Body.String())
+			}
+			if rec.Header().Get("Retry-After") != "5" {
+				t.Errorf("Retry-After = %q", rec.Header().Get("Retry-After"))
+			}
+
+			jobs, _ := store.List(t.Context())
+			if len(jobs) != 1 || jobs[0].Status != job.StatusFailed || !strings.HasPrefix(jobs[0].Error, "rejected: ") {
+				t.Errorf("rejected job not marked failed: %+v", jobs)
+			}
+		})
+	}
+}
+
+func TestCancelJob(t *testing.T) {
+	tests := []struct {
+		name       string
+		result     job.Job
+		err        error
+		wantStatus int
+	}{
+		{"pending job cancelled", job.Job{ID: "a", Status: job.StatusCancelled}, nil, http.StatusOK},
+		{"running job signalled", job.Job{ID: "a", Status: job.StatusRunning}, nil, http.StatusAccepted},
+		{"unknown job", job.Job{}, job.ErrNotFound, http.StatusNotFound},
+		{"finished job", job.Job{}, runner.ErrJobFinished, http.StatusConflict},
+		{"store failure", job.Job{}, errors.New("disk on fire"), http.StatusInternalServerError},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotID string
+			fr := &fakeRunner{cancel: func(_ context.Context, id string) (job.Job, error) {
+				gotID = id
+				return tc.result, tc.err
+			}}
+			h, _ := newTestServer(t, nil, fr)
+
+			rec := do(t, h, http.MethodPost, "/api/v1/pipelines/a/cancel", "")
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d: %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if gotID != "a" {
+				t.Errorf("runner got id %q", gotID)
+			}
+			if strings.Contains(rec.Body.String(), "disk on fire") {
+				t.Error("internal error leaked to the client")
+			}
+		})
+	}
+}
+
+func TestJobErrors(t *testing.T) {
+	h, store := newTestServer(t, nil, &fakeRunner{})
+
+	j := job.New(job.Spec{Name: "x"}, "")
+	j.Status = job.StatusCompleted
+	j.Progress = job.Progress{RecordsRead: 10, RecordsFailed: 3}
+	j.FailedRecords = []job.RecordError{
+		{Source: "csv", Index: 2, Stage: "validate", Reasons: []string{"amount: must be a number"}},
+		{Source: "csv", Index: 5, Stage: "ingest", Reasons: []string{"too many fields"}},
+	}
+	empty := job.New(job.Spec{Name: "y"}, "")
+	for _, x := range []job.Job{j, empty} {
+		if err := store.Create(t.Context(), x); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec := do(t, h, http.MethodGet, "/api/v1/pipelines/"+j.ID+"/errors", "")
+	body := decode[errorsResponse](t, rec)
+	if rec.Code != http.StatusOK || body.Total != 3 || body.Stored != 2 || !body.Complete || body.Errors[0].Index != 2 {
+		t.Errorf("status %d body %+v", rec.Code, body)
+	}
+
+	rec = do(t, h, http.MethodGet, "/api/v1/pipelines/"+empty.ID+"/errors", "")
+	if !strings.Contains(rec.Body.String(), `"errors":[]`) || !strings.Contains(rec.Body.String(), `"complete":false`) {
+		t.Errorf("pending job errors body = %s", rec.Body.String())
+	}
+
+	if rec := do(t, h, http.MethodGet, "/api/v1/pipelines/nope/errors", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown job: status %d", rec.Code)
+	}
+}
+
+func TestJobResponseHidesFailedRecords(t *testing.T) {
+	h, store := newTestServer(t, nil, &fakeRunner{})
+	j := job.New(job.Spec{Name: "x"}, "")
+	j.FailedRecords = []job.RecordError{{Source: "csv", Reasons: []string{"secret-ish"}}}
+	if err := store.Create(t.Context(), j); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, h, http.MethodGet, "/api/v1/pipelines/"+j.ID, "")
+	if strings.Contains(rec.Body.String(), "secret-ish") || !strings.Contains(rec.Body.String(), `"progress"`) {
+		t.Errorf("body = %s", rec.Body.String())
 	}
 }

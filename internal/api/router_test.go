@@ -2,11 +2,13 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 
@@ -14,17 +16,47 @@ import (
 	"github.com/Abhiadi12/go-data-processing-app/internal/logging"
 )
 
+// fakeRunner records submitted jobs instead of running them.
+type fakeRunner struct {
+	mu        sync.Mutex
+	submitted []string
+	submitErr error
+	cancel    func(ctx context.Context, id string) (job.Job, error)
+}
+
+func (f *fakeRunner) Submit(id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.submitErr != nil {
+		return f.submitErr
+	}
+	f.submitted = append(f.submitted, id)
+	return nil
+}
+
+func (f *fakeRunner) Cancel(ctx context.Context, id string) (job.Job, error) {
+	return f.cancel(ctx, id)
+}
+
 func newTestHandler(t *testing.T, logs io.Writer) http.Handler {
+	t.Helper()
+	h, _ := newTestServer(t, logs, &fakeRunner{})
+	return h
+}
+
+func newTestServer(t *testing.T, logs io.Writer, r JobRunner) (http.Handler, *job.MemoryStore) {
 	t.Helper()
 	if logs == nil {
 		logs = io.Discard
 	}
+	store := job.NewMemoryStore()
 	return NewHandler(Options{
 		Logger:       logging.New(logs, slog.LevelInfo, "json"),
-		Store:        job.NewMemoryStore(),
+		Store:        store,
+		Runner:       r,
 		Files:        fstest.MapFS{"orders.csv": {Data: []byte("order_id\n1\n")}},
 		MaxBodyBytes: 4096,
-	})
+	}), store
 }
 
 func do(t *testing.T, h http.Handler, method, path, body string) *httptest.ResponseRecorder {

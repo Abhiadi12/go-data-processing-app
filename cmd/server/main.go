@@ -15,6 +15,8 @@ import (
 	"github.com/Abhiadi12/go-data-processing-app/internal/config"
 	"github.com/Abhiadi12/go-data-processing-app/internal/job"
 	"github.com/Abhiadi12/go-data-processing-app/internal/logging"
+	"github.com/Abhiadi12/go-data-processing-app/internal/runner"
+	"github.com/Abhiadi12/go-data-processing-app/internal/source"
 )
 
 func main() {
@@ -40,9 +42,24 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	}
 	defer dataRoot.Close()
 
+	store := job.NewMemoryStore()
+	jobs := runner.New(runner.Options{
+		Store:  store,
+		Logger: logger,
+		Deps: job.SourceDeps{
+			Files:        dataRoot.FS(),
+			Client:       source.NewHTTPClient(cfg.AllowPrivateSources),
+			HTTPMaxBytes: cfg.HTTPSourceMaxBytes,
+		},
+		Workers:   cfg.JobWorkers,
+		QueueSize: cfg.JobQueueSize,
+	})
+	jobs.Start()
+
 	handler := api.NewHandler(api.Options{
 		Logger:       logger,
-		Store:        job.NewMemoryStore(),
+		Store:        store,
+		Runner:       jobs,
 		Files:        dataRoot.FS(),
 		MaxBodyBytes: cfg.MaxBodyBytes,
 	})
@@ -62,21 +79,24 @@ func run(cfg config.Config, logger *slog.Logger) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("listening", "addr", srv.Addr, "data_dir", cfg.DataDir, "log_level", cfg.LogLevel.String())
+		logger.Info("listening", "addr", srv.Addr, "data_dir", cfg.DataDir, "log_level", cfg.LogLevel.String(),
+			"job_workers", cfg.JobWorkers, "job_queue_size", cfg.JobQueueSize)
 		errCh <- srv.ListenAndServe()
 	}()
 
+	var serveErr error
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, http.ErrServerClosed) {
-			return err
+			serveErr = err
 		}
-		return nil
 	case <-ctx.Done():
 		logger.Info("shutting down")
 	}
 
+	// Stop accepting requests first, so no new jobs are submitted,
+	// then cancel running jobs and wait for them to record their status.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	return errors.Join(serveErr, srv.Shutdown(shutdownCtx), jobs.Shutdown(shutdownCtx))
 }
