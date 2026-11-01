@@ -133,6 +133,9 @@ func TestRunnerCompletesSampleJob(t *testing.T) {
 	if j.StartedAt == nil || j.FinishedAt == nil || j.FinishedAt.Before(*j.StartedAt) {
 		t.Errorf("bad timestamps: started %v finished %v", j.StartedAt, j.FinishedAt)
 	}
+	if len(j.Aggregates) != 3 || j.Aggregates[2].Groups[0].Metrics["sum_total"] != 4721.98 {
+		t.Errorf("aggregates not saved: %+v", j.Aggregates)
+	}
 }
 
 func TestRunnerFailsWhenSourceFails(t *testing.T) {
@@ -193,6 +196,9 @@ func TestRunnerCancelRunningJob(t *testing.T) {
 	}
 	if j.Progress.RecordsRead != 2 {
 		t.Errorf("progress before cancel lost: %+v", j.Progress)
+	}
+	if j.Aggregates != nil {
+		t.Error("a cancelled job must not keep partial aggregates")
 	}
 }
 

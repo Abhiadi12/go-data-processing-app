@@ -196,7 +196,7 @@ func (r *Runner) run(id string) {
 	errs := pipeline.NewErrors(j.Spec.Options.MaxStoredErrors)
 
 	stopProgress := r.reportProgress(ctx, id, counters)
-	runErr := r.execute(runCtx, j, counters, errs)
+	res, runErr := r.execute(runCtx, j, counters, errs)
 	stopProgress()
 
 	status, msg := outcome(runErr, timeout)
@@ -205,13 +205,14 @@ func (r *Runner) run(id string) {
 		return cmp.Or(cmp.Compare(a.Source, b.Source), cmp.Compare(a.Index, b.Index))
 	})
 
-	// The job's context may be cancelled by now; the final write must still
-	// happen, so it uses a context that keeps the values but not the cancellation.
 	final, err := r.store.Update(context.WithoutCancel(ctx), id, func(j *job.Job) error {
 		now := time.Now().UTC()
 		j.Status, j.Error, j.FinishedAt = status, msg, &now
 		j.Progress = counters.Snapshot()
 		j.FailedRecords = failed
+		if status == job.StatusCompleted {
+			j.Aggregates = res.Aggregates
+		}
 		return nil
 	})
 	if err != nil {
@@ -229,17 +230,14 @@ func (r *Runner) run(id string) {
 	)
 }
 
-func (r *Runner) execute(ctx context.Context, j job.Job, c *pipeline.Counters, errs *pipeline.Errors) error {
+func (r *Runner) execute(ctx context.Context, j job.Job, c *pipeline.Counters, errs *pipeline.Errors) (pipeline.Result, error) {
 	srcs, err := job.BuildSources(j.Spec.Sources, r.deps)
 	if err != nil {
-		return err
+		return pipeline.Result{}, err
 	}
 	return pipeline.Run(ctx, j.Spec, srcs, c, errs)
 }
 
-// reportProgress copies the live counters into the store every interval, so
-// GET /pipelines/{id} shows progress while the job runs. The returned func
-// stops the reporter and waits for it.
 func (r *Runner) reportProgress(ctx context.Context, id string, c *pipeline.Counters) func() {
 	done := make(chan struct{})
 	stopped := make(chan struct{})

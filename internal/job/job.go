@@ -30,6 +30,19 @@ type Job struct {
 	// FailedRecords holds the first options.max_stored_errors failures;
 	// Progress.RecordsFailed is the full count. Served by GET .../errors.
 	FailedRecords []RecordError `json:"-"`
+
+	Aggregates []AggregateResult `json:"-"`
+}
+
+type AggregateResult struct {
+	Name    string        `json:"name"`
+	GroupBy []string      `json:"group_by"`
+	Groups  []GroupResult `json:"groups"`
+}
+
+type GroupResult struct {
+	Key     map[string]any     `json:"key"`
+	Metrics map[string]float64 `json:"metrics"`
 }
 
 // Finished reports whether the job reached a final status.

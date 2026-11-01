@@ -43,6 +43,7 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("GET /api/v1/pipelines/{id}", s.handleGetJob)
 	mux.HandleFunc("POST /api/v1/pipelines/{id}/cancel", s.handleCancelJob)
 	mux.HandleFunc("GET /api/v1/pipelines/{id}/errors", s.handleJobErrors)
+	mux.HandleFunc("GET /api/v1/pipelines/{id}/results", s.handleJobResults)
 
 	return chain(mux,
 		requestID,

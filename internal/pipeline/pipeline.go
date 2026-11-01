@@ -1,5 +1,5 @@
 // Package pipeline runs a job's stages concurrently over channels:
-// sources → ingest (fan-in) → validate (worker pool) → sink.
+// sources → ingest (fan-in) → validate (worker pool) → transform (worker pool) → sink (aggregate).
 package pipeline
 
 import (
@@ -15,18 +15,19 @@ import (
 
 var ErrSourceFailed = errors.New("source failed")
 
-// StageFunc processes one record. It returns the new record, or the reasons
-// the record is rejected. It must be safe to call from many goroutines.
 type StageFunc func(record.Record) (record.Record, []string)
 
-// Run reads every source, validates each record and counts the results.
-// It returns nil when all input was processed, or why it stopped early:
-// the context's cause (cancel, timeout) or a wrapped ErrSourceFailed.
-func Run(ctx context.Context, spec job.Spec, sources []source.Source, c *Counters, errs *Errors) error {
+type Result struct {
+	Aggregates []job.AggregateResult
+}
+
+func Run(ctx context.Context, spec job.Spec, sources []source.Source, c *Counters, errs *Errors) (Result, error) {
 	v, err := NewValidator(spec.Schema)
 	if err != nil {
-		return err
+		return Result{}, err
 	}
+	t := NewTransformer(spec.Transforms)
+	agg := NewAggregator(spec.Aggregations)
 
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -34,18 +35,19 @@ func Run(ctx context.Context, spec job.Spec, sources []source.Source, c *Counter
 	o := spec.Options
 	records := ingest(ctx, cancel, sources, o.BufferSize, o.ContinueOnSourceError, c, errs)
 	valid := runStage(ctx, "validate", o.ValidateWorkers, o.BufferSize, records, v.Validate, c, errs)
+	transformed := runStage(ctx, "transform", o.TransformWorkers, o.BufferSize, valid, t.Transform, c, errs)
 
-	for range valid {
+	for rec := range transformed {
+		agg.Add(rec)
 		c.Valid.Add(1)
 	}
 
-	return context.Cause(ctx)
+	if err := context.Cause(ctx); err != nil {
+		return Result{}, err
+	}
+	return Result{Aggregates: agg.Results()}, nil
 }
 
-// ingest starts one goroutine per source and merges their records into one
-// channel (fan-in). Row errors are counted and stored, not sent on.
-// A failing source cancels the whole run unless continueOnErr is set.
-// ingest owns the returned channel and closes it after every source returns.
 func ingest(ctx context.Context, fail context.CancelCauseFunc, sources []source.Source,
 	bufSize int, continueOnErr bool, c *Counters, errs *Errors,
 ) <-chan record.Record {
@@ -90,9 +92,6 @@ func ingest(ctx context.Context, fail context.CancelCauseFunc, sources []source.
 	return out
 }
 
-// runStage starts workers goroutines that all read from in (fan-out) and apply
-// fn. Rejected records are counted and stored; the rest go to the returned
-// channel, which runStage owns and closes once every worker has stopped.
 func runStage(ctx context.Context, name string, workers, bufSize int, in <-chan record.Record,
 	fn StageFunc, c *Counters, errs *Errors,
 ) <-chan record.Record {

@@ -55,6 +55,7 @@ func (s *Spec) Validate(files fs.FS) error {
 	v.aggregations(s.Aggregations)
 	v.exports(s.Exports, len(s.Aggregations))
 	v.options(s.Options)
+	v.fieldReferences(s)
 
 	if len(v.problems) == 0 {
 		return nil
@@ -307,4 +308,50 @@ func (v *validator) options(o Options) {
 	v.upTo("options.buffer_size", o.BufferSize, MaxBufferSize)
 	v.upTo("options.timeout_seconds", o.TimeoutSeconds, MaxTimeoutSeconds)
 	v.upTo("options.max_stored_errors", o.MaxStoredErrors, MaxStoredErrors)
+}
+
+func (v *validator) fieldReferences(s *Spec) {
+	if s.Schema.UnknownFields == UnknownFieldsKeep || len(s.Schema.Fields) == 0 {
+		return
+	}
+
+	known := make(map[string]bool, len(s.Schema.Fields))
+	for _, f := range s.Schema.Fields {
+		known[f.Name] = true
+	}
+	use := func(path, name string) {
+		if name != "" && !known[name] {
+			v.add(path, "unknown field %q: not in the schema and not created by an earlier transform", name)
+		}
+	}
+
+	for i, t := range s.Transforms {
+		p := fmt.Sprintf("transforms[%d]", i)
+		for j, f := range t.Fields {
+			use(fmt.Sprintf("%s.fields[%d]", p, j), f)
+		}
+		switch t.Op {
+		case "rename":
+			use(p+".from", t.From)
+			delete(known, t.From)
+			known[t.To] = true
+		case "lookup":
+			use(p+".field", t.Field)
+			known[t.Target] = true
+		case "multiply":
+			known[t.Target] = true
+		case "default":
+			known[t.Field] = true
+		}
+	}
+
+	for i, a := range s.Aggregations {
+		p := fmt.Sprintf("aggregations[%d]", i)
+		for j, g := range a.GroupBy {
+			use(fmt.Sprintf("%s.group_by[%d]", p, j), g)
+		}
+		for j, m := range a.Metrics {
+			use(fmt.Sprintf("%s.metrics[%d].field", p, j), m.Field)
+		}
+	}
 }
