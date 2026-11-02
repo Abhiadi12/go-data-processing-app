@@ -1,8 +1,10 @@
 package pipeline
 
 import (
+	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Abhiadi12/go-data-processing-app/internal/job"
 )
@@ -13,6 +15,10 @@ type Counters struct {
 	Valid        atomic.Int64
 	Failed       atomic.Int64
 	SourceErrors atomic.Int64
+
+	Validate  StageTimer
+	Transform StageTimer
+	Sink      StageTimer
 }
 
 func (c *Counters) Snapshot() job.Progress {
@@ -22,6 +28,49 @@ func (c *Counters) Snapshot() job.Progress {
 		RecordsFailed: c.Failed.Load(),
 		SourceErrors:  c.SourceErrors.Load(),
 	}
+}
+
+// Stages returns the per-record latency of each stage. "sink" is the
+// aggregate + export step at the end of the pipeline.
+func (c *Counters) Stages() []job.StageStat {
+	return []job.StageStat{
+		c.Validate.stat("validate"),
+		c.Transform.stat("transform"),
+		c.Sink.stat("sink"),
+	}
+}
+
+// StageTimer records how long a stage spends per record. Many workers call
+// Observe at once, so it uses atomics; the maximum is updated with a
+// compare-and-swap loop.
+type StageTimer struct {
+	count   atomic.Int64
+	totalNs atomic.Int64
+	maxNs   atomic.Int64
+}
+
+func (s *StageTimer) Observe(d time.Duration) {
+	ns := d.Nanoseconds()
+	s.count.Add(1)
+	s.totalNs.Add(ns)
+	for {
+		cur := s.maxNs.Load()
+		if ns <= cur || s.maxNs.CompareAndSwap(cur, ns) {
+			return
+		}
+	}
+}
+
+func (s *StageTimer) stat(name string) job.StageStat {
+	st := job.StageStat{Stage: name, Records: s.count.Load(), MaxMicros: micros(s.maxNs.Load())}
+	if st.Records > 0 {
+		st.AvgMicros = micros(s.totalNs.Load() / st.Records)
+	}
+	return st
+}
+
+func micros(ns int64) float64 {
+	return math.Round(float64(ns)/10) / 100
 }
 
 // Errors keeps the first max failures and counts all of them, so a file full

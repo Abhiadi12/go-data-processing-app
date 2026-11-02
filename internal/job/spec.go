@@ -123,3 +123,38 @@ func setDefault(v *int, def int) {
 		*v = def
 	}
 }
+
+// OutputFields lists the fields a processed record can have, in a stable
+// order: schema fields first, then fields created by transforms, with renames
+// applied. CSV exports use it as their columns.
+func (s *Spec) OutputFields() []string {
+	var fields []string
+	index := make(map[string]int)
+	add := func(name string) {
+		if _, ok := index[name]; !ok && name != "" {
+			index[name] = len(fields)
+			fields = append(fields, name)
+		}
+	}
+
+	for _, f := range s.Schema.Fields {
+		add(f.Name)
+	}
+	for _, t := range s.Transforms {
+		switch t.Op {
+		case "rename":
+			if i, ok := index[t.From]; ok {
+				if _, exists := index[t.To]; !exists {
+					fields[i] = t.To
+					delete(index, t.From)
+					index[t.To] = i
+				}
+			}
+		case "multiply", "lookup":
+			add(t.Target)
+		case "default":
+			add(t.Field)
+		}
+	}
+	return fields
+}

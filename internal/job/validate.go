@@ -34,7 +34,7 @@ var (
 	fieldTypes    = []string{"string", "int", "float", "bool", "date"}
 	stringOps     = []string{"trim", "lowercase", "uppercase", "title"}
 	metricOps     = []string{"count", "sum", "avg", "min", "max"}
-	exportTypes   = []string{"json", "csv"}
+	exportTypes   = []string{"json", "csv", "sqlite"}
 	exportContent = []string{"records", "aggregates"}
 	identifier    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )

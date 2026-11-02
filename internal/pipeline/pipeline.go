@@ -7,21 +7,31 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/Abhiadi12/go-data-processing-app/internal/job"
 	"github.com/Abhiadi12/go-data-processing-app/internal/record"
 	"github.com/Abhiadi12/go-data-processing-app/internal/source"
 )
 
-var ErrSourceFailed = errors.New("source failed")
+var (
+	ErrSourceFailed = errors.New("source failed")
+	ErrExportFailed = errors.New("export failed")
+)
 
 type StageFunc func(record.Record) (record.Record, []string)
+
+// RecordWriter receives every processed record, from the sink goroutine only
+// (export.Set implements it). It may be nil when nothing is exported.
+type RecordWriter interface {
+	WriteRecord(record.Record) error
+}
 
 type Result struct {
 	Aggregates []job.AggregateResult
 }
 
-func Run(ctx context.Context, spec job.Spec, sources []source.Source, c *Counters, errs *Errors) (Result, error) {
+func Run(ctx context.Context, spec job.Spec, sources []source.Source, w RecordWriter, c *Counters, errs *Errors) (Result, error) {
 	v, err := NewValidator(spec.Schema)
 	if err != nil {
 		return Result{}, err
@@ -34,11 +44,21 @@ func Run(ctx context.Context, spec job.Spec, sources []source.Source, c *Counter
 
 	o := spec.Options
 	records := ingest(ctx, cancel, sources, o.BufferSize, o.ContinueOnSourceError, c, errs)
-	valid := runStage(ctx, "validate", o.ValidateWorkers, o.BufferSize, records, v.Validate, c, errs)
-	transformed := runStage(ctx, "transform", o.TransformWorkers, o.BufferSize, valid, t.Transform, c, errs)
+	valid := runStage(ctx, "validate", o.ValidateWorkers, o.BufferSize, records, v.Validate, &c.Validate, c, errs)
+	transformed := runStage(ctx, "transform", o.TransformWorkers, o.BufferSize, valid, t.Transform, &c.Transform, c, errs)
 
+	// The sink: this goroutine alone owns the aggregator and the writers, so
+	// neither needs a lock. A write error stops the whole run.
 	for rec := range transformed {
+		start := time.Now()
+		if w != nil {
+			if err := w.WriteRecord(rec); err != nil {
+				cancel(fmt.Errorf("%w: %w", ErrExportFailed, err))
+				break
+			}
+		}
 		agg.Add(rec)
+		c.Sink.Observe(time.Since(start))
 		c.Valid.Add(1)
 	}
 
@@ -93,7 +113,7 @@ func ingest(ctx context.Context, fail context.CancelCauseFunc, sources []source.
 }
 
 func runStage(ctx context.Context, name string, workers, bufSize int, in <-chan record.Record,
-	fn StageFunc, c *Counters, errs *Errors,
+	fn StageFunc, timer *StageTimer, c *Counters, errs *Errors,
 ) <-chan record.Record {
 	out := make(chan record.Record, bufSize)
 
@@ -114,7 +134,9 @@ func runStage(ctx context.Context, name string, workers, bufSize int, in <-chan 
 					}
 				}
 
+				start := time.Now()
 				res, reasons := fn(rec)
+				timer.Observe(time.Since(start))
 				if len(reasons) > 0 {
 					c.Failed.Add(1)
 					errs.Add(job.RecordError{Source: rec.Source, Index: rec.Index, Stage: name, Reasons: reasons, Record: rec.Fields})

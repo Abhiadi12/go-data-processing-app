@@ -95,7 +95,7 @@ func TestRunSampleFiles(t *testing.T) {
 
 	var c Counters
 	errs := NewErrors(100)
-	res, err := Run(context.Background(), spec, srcs, &c, errs)
+	res, err := Run(context.Background(), spec, srcs, nil, &c, errs)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestRunSourceFailureStopsEverything(t *testing.T) {
 
 	var c Counters
 	errs := NewErrors(10)
-	_, err := Run(context.Background(), simpleSpec(), srcs, &c, errs)
+	_, err := Run(context.Background(), simpleSpec(), srcs, nil, &c, errs)
 
 	if !errors.Is(err, ErrSourceFailed) || !strings.Contains(err.Error(), "connection refused") {
 		t.Fatalf("err = %v, want ErrSourceFailed with the cause", err)
@@ -179,7 +179,7 @@ func TestRunContinueOnSourceError(t *testing.T) {
 	spec.Options.ContinueOnSourceError = true
 
 	var c Counters
-	_, err := Run(context.Background(), spec, []source.Source{failing("api"), fixed("file", 5)}, &c, NewErrors(10))
+	_, err := Run(context.Background(), spec, []source.Source{failing("api"), fixed("file", 5)}, nil, &c, NewErrors(10))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestRunStopsOnCancel(t *testing.T) {
 	}()
 
 	var c Counters
-	_, err := Run(ctx, simpleSpec(), []source.Source{endless("big", stopped)}, &c, NewErrors(10))
+	_, err := Run(ctx, simpleSpec(), []source.Source{endless("big", stopped)}, nil, &c, NewErrors(10))
 	if !errors.Is(err, errUser) {
 		t.Fatalf("err = %v, want the cancel cause", err)
 	}
@@ -214,7 +214,7 @@ func TestRunStopsOnTimeout(t *testing.T) {
 	defer cancel()
 	stopped := make(chan struct{})
 
-	_, err := Run(ctx, simpleSpec(), []source.Source{endless("big", stopped)}, &Counters{}, NewErrors(10))
+	_, err := Run(ctx, simpleSpec(), []source.Source{endless("big", stopped)}, nil, &Counters{}, NewErrors(10))
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want DeadlineExceeded", err)
 	}
@@ -231,7 +231,7 @@ func TestRunRowErrorsFromSources(t *testing.T) {
 
 	var c Counters
 	errs := NewErrors(10)
-	if _, err := Run(context.Background(), simpleSpec(), []source.Source{src}, &c, errs); err != nil {
+	if _, err := Run(context.Background(), simpleSpec(), []source.Source{src}, nil, &c, errs); err != nil {
 		t.Fatal(err)
 	}
 	if got := c.Snapshot(); got.RecordsRead != 2 || got.RecordsValid != 1 || got.RecordsFailed != 1 {
@@ -268,7 +268,7 @@ func TestStageUsesAllWorkers(t *testing.T) {
 		return r, nil
 	}
 
-	out := runStage(context.Background(), "test", workers, 1, in, fn, &Counters{}, NewErrors(1))
+	out := runStage(context.Background(), "test", workers, 1, in, fn, &StageTimer{}, &Counters{}, NewErrors(1))
 	var n int
 	for range out {
 		n++
@@ -295,7 +295,7 @@ func TestStageDropsRejectedRecords(t *testing.T) {
 	}
 
 	var got []int
-	for r := range runStage(context.Background(), "check", 2, 1, in, evenOnly, &c, errs) {
+	for r := range runStage(context.Background(), "check", 2, 1, in, evenOnly, &StageTimer{}, &c, errs) {
 		got = append(got, r.Index)
 	}
 	if !slices.Equal(got, []int{2}) || c.Failed.Load() != 2 {
@@ -303,5 +303,79 @@ func TestStageDropsRejectedRecords(t *testing.T) {
 	}
 	if items, _ := errs.Snapshot(); items[0].Stage != "check" {
 		t.Errorf("stage name not recorded: %+v", items[0])
+	}
+}
+
+// recordingWriter collects records, or fails after failAfter writes.
+type recordingWriter struct {
+	got       []record.Record
+	failAfter int
+}
+
+func (w *recordingWriter) WriteRecord(r record.Record) error {
+	if w.failAfter > 0 && len(w.got) == w.failAfter {
+		return errors.New("disk full")
+	}
+	w.got = append(w.got, r)
+	return nil
+}
+
+func TestRunWritesEveryValidRecord(t *testing.T) {
+	w := &recordingWriter{}
+	var c Counters
+	if _, err := Run(context.Background(), simpleSpec(), []source.Source{fixed("a", 30), fixed("b", 20)}, w, &c, NewErrors(10)); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.got) != 50 || c.Valid.Load() != 50 {
+		t.Errorf("writer got %d records, valid %d; want 50", len(w.got), c.Valid.Load())
+	}
+}
+
+func TestRunStopsWhenExportFails(t *testing.T) {
+	stopped := make(chan struct{})
+	w := &recordingWriter{failAfter: 3}
+
+	_, err := Run(context.Background(), simpleSpec(), []source.Source{endless("big", stopped)}, w, &Counters{}, NewErrors(10))
+	if !errors.Is(err, ErrExportFailed) || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("err = %v, want ErrExportFailed with the cause", err)
+	}
+	waitClosed(t, stopped, "the source")
+}
+
+func TestRunRecordsStageLatencies(t *testing.T) {
+	var c Counters
+	if _, err := Run(context.Background(), simpleSpec(), []source.Source{fixed("a", 10)}, nil, &c, NewErrors(10)); err != nil {
+		t.Fatal(err)
+	}
+
+	stages := c.Stages()
+	if len(stages) != 3 {
+		t.Fatalf("got %d stages", len(stages))
+	}
+	for _, s := range stages {
+		if s.Records != 10 || s.MaxMicros < s.AvgMicros {
+			t.Errorf("stage %+v: want 10 records and max >= avg", s)
+		}
+	}
+	if stages[0].Stage != "validate" || stages[1].Stage != "transform" || stages[2].Stage != "sink" {
+		t.Errorf("stage names = %v", stages)
+	}
+}
+
+func TestStageTimerConcurrent(t *testing.T) {
+	var st StageTimer
+	var wg sync.WaitGroup
+	for i := 1; i <= 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			st.Observe(time.Duration(i) * time.Microsecond)
+		}()
+	}
+	wg.Wait()
+
+	s := st.stat("x")
+	if s.Records != 100 || s.MaxMicros != 100 || s.AvgMicros != 50.5 {
+		t.Errorf("stat = %+v, want 100 records, max 100, avg 50.5", s)
 	}
 }

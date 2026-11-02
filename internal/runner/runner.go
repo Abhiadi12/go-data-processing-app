@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Abhiadi12/go-data-processing-app/internal/export"
 	"github.com/Abhiadi12/go-data-processing-app/internal/job"
 	"github.com/Abhiadi12/go-data-processing-app/internal/logging"
 	"github.com/Abhiadi12/go-data-processing-app/internal/pipeline"
@@ -30,6 +31,7 @@ var (
 type Options struct {
 	Store            job.Store
 	Deps             job.SourceDeps
+	Exports          export.Deps
 	Logger           *slog.Logger
 	Workers          int
 	QueueSize        int
@@ -39,6 +41,7 @@ type Options struct {
 type Runner struct {
 	store    job.Store
 	deps     job.SourceDeps
+	exports  export.Deps
 	logger   *slog.Logger
 	workers  int
 	interval time.Duration
@@ -60,6 +63,7 @@ func New(opts Options) *Runner {
 	return &Runner{
 		store:    opts.Store,
 		deps:     opts.Deps,
+		exports:  opts.Exports,
 		logger:   opts.Logger,
 		workers:  opts.Workers,
 		interval: opts.ProgressInterval,
@@ -209,9 +213,11 @@ func (r *Runner) run(id string) {
 		now := time.Now().UTC()
 		j.Status, j.Error, j.FinishedAt = status, msg, &now
 		j.Progress = counters.Snapshot()
+		j.Stages = counters.Stages()
 		j.FailedRecords = failed
 		if status == job.StatusCompleted {
 			j.Aggregates = res.Aggregates
+			j.Outputs = res.Outputs
 		}
 		return nil
 	})
@@ -230,12 +236,35 @@ func (r *Runner) run(id string) {
 	)
 }
 
-func (r *Runner) execute(ctx context.Context, j job.Job, c *pipeline.Counters, errs *pipeline.Errors) (pipeline.Result, error) {
+type result struct {
+	pipeline.Result
+	Outputs []job.Output
+}
+
+// execute runs the pipeline with the job's exports open, then commits them.
+// Any failure (or cancel) aborts the exports, so no partial output is left.
+func (r *Runner) execute(ctx context.Context, j job.Job, c *pipeline.Counters, errs *pipeline.Errors) (result, error) {
 	srcs, err := job.BuildSources(j.Spec.Sources, r.deps)
 	if err != nil {
-		return pipeline.Result{}, err
+		return result{}, err
 	}
-	return pipeline.Run(ctx, j.Spec, srcs, c, errs)
+
+	set, err := export.Open(ctx, j, r.exports)
+	if err != nil {
+		return result{}, fmt.Errorf("%w: %w", pipeline.ErrExportFailed, err)
+	}
+
+	res, err := pipeline.Run(ctx, j.Spec, srcs, set, c, errs)
+	if err != nil {
+		set.Abort()
+		return result{}, err
+	}
+
+	outputs, err := set.Commit(ctx, res.Aggregates)
+	if err != nil {
+		return result{}, fmt.Errorf("%w: %w", pipeline.ErrExportFailed, err)
+	}
+	return result{Result: res, Outputs: outputs}, nil
 }
 
 func (r *Runner) reportProgress(ctx context.Context, id string, c *pipeline.Counters) func() {
@@ -253,6 +282,7 @@ func (r *Runner) reportProgress(ctx context.Context, id string, c *pipeline.Coun
 			case <-t.C:
 				_, err := r.store.Update(ctx, id, func(j *job.Job) error {
 					j.Progress = c.Snapshot()
+					j.Stages = c.Stages()
 					return nil
 				})
 				if err != nil {

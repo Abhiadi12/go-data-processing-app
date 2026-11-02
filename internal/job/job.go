@@ -32,6 +32,29 @@ type Job struct {
 	FailedRecords []RecordError `json:"-"`
 
 	Aggregates []AggregateResult `json:"-"`
+
+	// Outputs lists what a completed job wrote (files and SQLite tables).
+	Outputs []Output `json:"outputs,omitempty"`
+
+	// Stages holds per-stage timings, updated while the job runs.
+	Stages []StageStat `json:"-"`
+}
+
+// Output is one export the job wrote. Location is a file path for json/csv,
+// or a table name for sqlite.
+type Output struct {
+	Type     string `json:"type"`
+	Content  string `json:"content"`
+	Location string `json:"location"`
+	Rows     int64  `json:"rows"`
+}
+
+// StageStat is how long one pipeline stage spent per record.
+type StageStat struct {
+	Stage     string  `json:"stage"`
+	Records   int64   `json:"records"`
+	AvgMicros float64 `json:"avg_micros"`
+	MaxMicros float64 `json:"max_micros"`
 }
 
 type AggregateResult struct {

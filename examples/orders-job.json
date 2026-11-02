@@ -46,7 +46,9 @@
   "exports": [
     { "type": "json", "content": "records" },
     { "type": "csv", "content": "records" },
-    { "type": "json", "content": "aggregates" }
+    { "type": "json", "content": "aggregates" },
+    { "type": "sqlite", "content": "records" },
+    { "type": "sqlite", "content": "aggregates" }
   ],
   "options": {
     "validate_workers": 4,
