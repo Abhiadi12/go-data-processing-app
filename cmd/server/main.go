@@ -13,6 +13,7 @@ import (
 
 	"github.com/Abhiadi12/go-data-processing-app/internal/api"
 	"github.com/Abhiadi12/go-data-processing-app/internal/config"
+	"github.com/Abhiadi12/go-data-processing-app/internal/export"
 	"github.com/Abhiadi12/go-data-processing-app/internal/job"
 	"github.com/Abhiadi12/go-data-processing-app/internal/logging"
 	"github.com/Abhiadi12/go-data-processing-app/internal/runner"
@@ -42,6 +43,12 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	}
 	defer dataRoot.Close()
 
+	db, err := export.OpenSQLite(context.Background(), cfg.SQLitePath)
+	if err != nil {
+		return err
+	}
+	defer db.Close() // deferred, so it runs after the runner has finished in the return below
+
 	store := job.NewMemoryStore()
 	jobs := runner.New(runner.Options{
 		Store:  store,
@@ -51,6 +58,7 @@ func run(cfg config.Config, logger *slog.Logger) error {
 			Client:       source.NewHTTPClient(cfg.AllowPrivateSources),
 			HTTPMaxBytes: cfg.HTTPSourceMaxBytes,
 		},
+		Exports:   export.Deps{OutputDir: cfg.OutputDir, DB: db},
 		Workers:   cfg.JobWorkers,
 		QueueSize: cfg.JobQueueSize,
 	})
@@ -80,7 +88,8 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("listening", "addr", srv.Addr, "data_dir", cfg.DataDir, "log_level", cfg.LogLevel.String(),
-			"job_workers", cfg.JobWorkers, "job_queue_size", cfg.JobQueueSize)
+			"job_workers", cfg.JobWorkers, "job_queue_size", cfg.JobQueueSize,
+			"output_dir", cfg.OutputDir, "sqlite_path", cfg.SQLitePath)
 		errCh <- srv.ListenAndServe()
 	}()
 

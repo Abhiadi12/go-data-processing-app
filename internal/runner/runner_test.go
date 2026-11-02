@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,11 +11,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
 
+	"github.com/Abhiadi12/go-data-processing-app/internal/export"
 	"github.com/Abhiadi12/go-data-processing-app/internal/job"
 	"github.com/Abhiadi12/go-data-processing-app/internal/source"
 )
@@ -22,14 +25,22 @@ import (
 type setup struct {
 	store  *job.MemoryStore
 	runner *Runner
+	outDir string
+	db     *sql.DB
 }
 
 func newSetup(t *testing.T, workers, queue int, deps job.SourceDeps) setup {
 	t.Helper()
 	store := job.NewMemoryStore()
+	outDir := t.TempDir()
+	db, err := export.OpenSQLite(t.Context(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	r := New(Options{
 		Store:            store,
 		Deps:             deps,
+		Exports:          export.Deps{OutputDir: outDir, DB: db},
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Workers:          workers,
 		QueueSize:        queue,
@@ -42,8 +53,9 @@ func newSetup(t *testing.T, workers, queue int, deps job.SourceDeps) setup {
 		if err := r.Shutdown(ctx); err != nil {
 			t.Errorf("shutdown: %v", err)
 		}
+		_ = db.Close()
 	})
-	return setup{store: store, runner: r}
+	return setup{store: store, runner: r, outDir: outDir, db: db}
 }
 
 func (s setup) submit(t *testing.T, spec job.Spec) string {
@@ -136,6 +148,23 @@ func TestRunnerCompletesSampleJob(t *testing.T) {
 	if len(j.Aggregates) != 3 || j.Aggregates[2].Groups[0].Metrics["sum_total"] != 4721.98 {
 		t.Errorf("aggregates not saved: %+v", j.Aggregates)
 	}
+	if len(j.Outputs) != 5 {
+		t.Fatalf("outputs = %+v, want 5", j.Outputs)
+	}
+	for _, o := range j.Outputs {
+		if o.Rows != 7 {
+			t.Errorf("output %s/%s has %d rows, want 7 (records or groups)", o.Type, o.Content, o.Rows)
+		}
+		if o.Type == "sqlite" {
+			continue
+		}
+		if _, err := os.Stat(o.Location); err != nil {
+			t.Errorf("output file missing: %v", err)
+		}
+	}
+	if len(j.Stages) != 3 || j.Stages[0].Records != 15 || j.Stages[1].Records != 7 {
+		t.Errorf("stages = %+v, want validate 15 and transform 7 records", j.Stages)
+	}
 }
 
 func TestRunnerFailsWhenSourceFails(t *testing.T) {
@@ -183,7 +212,9 @@ func TestRunnerReportsProgressWhileRunning(t *testing.T) {
 
 func TestRunnerCancelRunningJob(t *testing.T) {
 	s := newSetup(t, 1, 10, httpDeps())
-	id := s.submit(t, httpSpec(slowServer(t).URL))
+	spec := httpSpec(slowServer(t).URL)
+	spec.Exports = []job.Export{{Type: "json", Content: "records"}, {Type: "sqlite", Content: "records"}}
+	id := s.submit(t, spec)
 	s.waitFor(t, id, func(j job.Job) bool { return j.Status == job.StatusRunning })
 
 	if _, err := s.runner.Cancel(context.Background(), id); err != nil {
@@ -199,6 +230,14 @@ func TestRunnerCancelRunningJob(t *testing.T) {
 	}
 	if j.Aggregates != nil {
 		t.Error("a cancelled job must not keep partial aggregates")
+	}
+	if _, err := os.Stat(filepath.Join(s.outDir, id)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a cancelled job left an output directory: %v", err)
+	}
+	var rows int
+	_ = s.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM job_records").Scan(&rows)
+	if rows != 0 {
+		t.Errorf("a cancelled job left %d sqlite rows", rows)
 	}
 }
 
@@ -268,5 +307,52 @@ func TestRunnerShutdownCancelsRunningJobs(t *testing.T) {
 	}
 	if err := s.runner.Submit("late"); !errors.Is(err, ErrStopped) {
 		t.Errorf("submit after shutdown: err = %v, want ErrStopped", err)
+	}
+}
+
+func TestRunnerExportsToSQLite(t *testing.T) {
+	data, err := os.ReadFile("../../examples/orders-job.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spec job.Spec
+	if err := json.Unmarshal(data, &spec); err != nil {
+		t.Fatal(err)
+	}
+	spec.Exports = []job.Export{{Type: "sqlite", Content: "records"}, {Type: "sqlite", Content: "aggregates"}}
+
+	s := newSetup(t, 1, 10, job.SourceDeps{Files: os.DirFS("../..")})
+	id := s.submit(t, spec)
+	j := s.waitFor(t, id, finished)
+	if j.Status != job.StatusCompleted {
+		t.Fatalf("status %s error %q", j.Status, j.Error)
+	}
+
+	var records, groups int
+	var total float64
+	_ = s.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM job_records WHERE job_id = ?", id).Scan(&records)
+	_ = s.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM job_aggregates WHERE job_id = ?", id).Scan(&groups)
+	_ = s.db.QueryRowContext(t.Context(),
+		"SELECT json_extract(metrics, '$.sum_total') FROM job_aggregates WHERE job_id = ? AND aggregation = 'overall'", id).Scan(&total)
+	if records != 7 || groups != 7 || total != 4721.98 {
+		t.Errorf("sqlite has %d records, %d groups, overall total %v; want 7, 7, 4721.98", records, groups, total)
+	}
+}
+
+func TestRunnerFailsWhenExportCannotOpen(t *testing.T) {
+	s := newSetup(t, 1, 10, job.SourceDeps{Files: fstest.MapFS{"a.json": {Data: []byte(`[{"id":1}]`)}}})
+	s.runner.exports.OutputDir = filepath.Join(s.outDir, "file-not-dir")
+	if err := os.WriteFile(s.runner.exports.OutputDir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := job.Spec{
+		Sources: []job.SourceSpec{{Name: "a", Type: "json", Path: "a.json"}},
+		Schema:  job.Schema{Fields: []job.Field{{Name: "id", Type: "int"}}},
+		Exports: []job.Export{{Type: "json", Content: "records"}},
+	}
+	j := s.waitFor(t, s.submit(t, spec), finished)
+	if j.Status != job.StatusFailed || !strings.Contains(j.Error, "export failed") {
+		t.Errorf("status %s error %q", j.Status, j.Error)
 	}
 }

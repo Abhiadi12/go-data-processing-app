@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/Abhiadi12/go-data-processing-app/internal/job"
 )
@@ -20,10 +21,11 @@ type Options struct {
 }
 
 type server struct {
-	logger *slog.Logger
-	store  job.Store
-	runner JobRunner
-	files  fs.FS
+	logger  *slog.Logger
+	store   job.Store
+	runner  JobRunner
+	files   fs.FS
+	started time.Time
 }
 
 // JobRunner runs jobs in the background (implemented by runner.Runner).
@@ -32,9 +34,8 @@ type JobRunner interface {
 	Cancel(ctx context.Context, id string) (job.Job, error)
 }
 
-// NewHandler returns the API with all routes and middleware.
 func NewHandler(opts Options) http.Handler {
-	s := &server{logger: opts.Logger, store: opts.Store, runner: opts.Runner, files: opts.Files}
+	s := &server{logger: opts.Logger, store: opts.Store, runner: opts.Runner, files: opts.Files, started: time.Now()}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
@@ -44,6 +45,8 @@ func NewHandler(opts Options) http.Handler {
 	mux.HandleFunc("POST /api/v1/pipelines/{id}/cancel", s.handleCancelJob)
 	mux.HandleFunc("GET /api/v1/pipelines/{id}/errors", s.handleJobErrors)
 	mux.HandleFunc("GET /api/v1/pipelines/{id}/results", s.handleJobResults)
+	mux.HandleFunc("GET /api/v1/pipelines/{id}/progress", s.handleJobProgress)
+	mux.HandleFunc("GET /api/v1/metrics", s.handleMetrics)
 
 	return chain(mux,
 		requestID,

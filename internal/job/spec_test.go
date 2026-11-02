@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -213,7 +214,7 @@ func TestExampleSpecFile(t *testing.T) {
 	if err := s.Validate(os.DirFS("../..")); err != nil {
 		t.Fatalf("example spec is invalid: %v", err)
 	}
-	if len(s.Sources) != 2 || len(s.Transforms) != 6 || len(s.Aggregations) != 3 || len(s.Exports) != 3 {
+	if len(s.Sources) != 2 || len(s.Transforms) != 6 || len(s.Aggregations) != 3 || len(s.Exports) != 5 {
 		t.Errorf("unexpected shape: %d sources, %d transforms, %d aggregations, %d exports",
 			len(s.Sources), len(s.Transforms), len(s.Aggregations), len(s.Exports))
 	}
@@ -243,5 +244,24 @@ func TestFieldReferencesSkippedWhenKeepingUnknownFields(t *testing.T) {
 
 	if err := s.Validate(testFiles); err != nil {
 		t.Fatalf("with unknown_fields keep any field may exist: %v", err)
+	}
+}
+
+func TestOutputFields(t *testing.T) {
+	s := Spec{
+		Schema: Schema{Fields: []Field{{Name: "id"}, {Name: "cc"}, {Name: "amount"}, {Name: "qty"}}},
+		Transforms: []Transform{
+			{Op: "trim", Fields: []string{"cc"}},
+			{Op: "rename", From: "cc", To: "country"},
+			{Op: "multiply", Fields: []string{"amount", "qty"}, Target: "total"},
+			{Op: "lookup", Field: "country", Target: "region"},
+			{Op: "default", Field: "channel", Value: "web"},
+			{Op: "default", Field: "id", Value: 0},
+		},
+	}
+
+	want := []string{"id", "country", "amount", "qty", "total", "region", "channel"}
+	if got := s.OutputFields(); !slices.Equal(got, want) {
+		t.Errorf("OutputFields() = %v, want %v", got, want)
 	}
 }

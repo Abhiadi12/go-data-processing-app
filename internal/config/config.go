@@ -29,6 +29,9 @@ type Config struct {
 
 	JobWorkers   int
 	JobQueueSize int
+
+	OutputDir  string
+	SQLitePath string
 }
 
 // Load reads the configuration through getenv (os.Getenv in production)
@@ -54,6 +57,9 @@ func Load(getenv func(string) string) (Config, error) {
 
 		JobWorkers:   l.count("JOB_WORKERS", 2, 64),
 		JobQueueSize: l.count("JOB_QUEUE_SIZE", 100, 10000),
+
+		OutputDir:  l.str("OUTPUT_DIR", "data/output"),
+		SQLitePath: l.str("SQLITE_PATH", "data/datapipe.db"),
 	}
 
 	if p, err := strconv.Atoi(cfg.Port); err != nil || p < 1 || p > 65535 {

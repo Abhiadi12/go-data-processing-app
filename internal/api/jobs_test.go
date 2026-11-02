@@ -8,8 +8,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Abhiadi12/go-data-processing-app/internal/job"
+	"github.com/Abhiadi12/go-data-processing-app/internal/metrics"
 	"github.com/Abhiadi12/go-data-processing-app/internal/runner"
 )
 
@@ -310,5 +312,76 @@ func TestJobResults(t *testing.T) {
 
 	if rec := do(t, h, http.MethodGet, "/api/v1/pipelines/nope/results", ""); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown job: status %d", rec.Code)
+	}
+}
+
+func TestJobProgress(t *testing.T) {
+	h, store := newTestServer(t, nil, &fakeRunner{})
+
+	started := time.Now().Add(-2 * time.Second).UTC()
+	j := job.New(job.Spec{Name: "x"}, "")
+	j.Status, j.StartedAt = job.StatusRunning, &started
+	j.Progress = job.Progress{RecordsRead: 100, RecordsValid: 90, RecordsFailed: 10}
+	j.Stages = []job.StageStat{{Stage: "validate", Records: 100, AvgMicros: 3.5, MaxMicros: 20}}
+	if err := store.Create(t.Context(), j); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, h, http.MethodGet, "/api/v1/pipelines/"+j.ID+"/progress", "")
+	body := decode[metrics.Progress](t, rec)
+	if rec.Code != http.StatusOK || body.Counts.RecordsRead != 100 || body.PercentComplete != nil ||
+		body.RecordsPerSecond < 40 || body.RecordsPerSecond > 51 || body.Stages[0].AvgMicros != 3.5 {
+		t.Errorf("status %d body %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"percent_complete":null`) {
+		t.Errorf("running job should report percent_complete null: %s", rec.Body.String())
+	}
+
+	if rec := do(t, h, http.MethodGet, "/api/v1/pipelines/nope/progress", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown job: status %d", rec.Code)
+	}
+}
+
+func TestMetrics(t *testing.T) {
+	h, store := newTestServer(t, nil, &fakeRunner{})
+	for _, st := range []job.Status{job.StatusCompleted, job.StatusCompleted, job.StatusFailed} {
+		j := job.New(job.Spec{Name: "x"}, "")
+		j.Status = st
+		j.Progress = job.Progress{RecordsRead: 10, RecordsValid: 8, RecordsFailed: 2}
+		if err := store.Create(t.Context(), j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rec := do(t, h, http.MethodGet, "/api/v1/metrics", "")
+	var body struct {
+		Jobs       map[string]int `json:"jobs"`
+		Records    job.Progress   `json:"records"`
+		ErrorRate  float64        `json:"error_rate"`
+		Goroutines int            `json:"goroutines"`
+		Uptime     *float64       `json:"uptime_seconds"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || body.Jobs["completed"] != 2 || body.Jobs["failed"] != 1 || body.Jobs["running"] != 0 ||
+		body.Records.RecordsRead != 30 || body.ErrorRate != 0.2 || body.Goroutines < 1 || body.Uptime == nil {
+		t.Errorf("status %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJobResultsIncludeOutputs(t *testing.T) {
+	h, store := newTestServer(t, nil, &fakeRunner{})
+	j := job.New(job.Spec{Name: "x"}, "")
+	j.Status = job.StatusCompleted
+	j.Outputs = []job.Output{{Type: "csv", Content: "records", Location: "data/output/X/records.csv", Rows: 7}}
+	if err := store.Create(t.Context(), j); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := do(t, h, http.MethodGet, "/api/v1/pipelines/"+j.ID+"/results", "")
+	body := decode[resultsResponse](t, rec)
+	if len(body.Outputs) != 1 || body.Outputs[0].Rows != 7 {
+		t.Errorf("body %s", rec.Body.String())
 	}
 }

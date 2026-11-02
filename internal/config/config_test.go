@@ -22,6 +22,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.DataDir != "." || cfg.MaxBodyBytes != 1<<20 || cfg.AllowPrivateSources {
 		t.Errorf("got data dir %q body %d private %v", cfg.DataDir, cfg.MaxBodyBytes, cfg.AllowPrivateSources)
 	}
+	if cfg.OutputDir != "data/output" || cfg.SQLitePath != "data/datapipe.db" {
+		t.Errorf("got output dir %q sqlite path %q", cfg.OutputDir, cfg.SQLitePath)
+	}
 	if cfg.JobWorkers != 2 || cfg.JobQueueSize != 100 {
 		t.Errorf("got job workers %d queue %d", cfg.JobWorkers, cfg.JobQueueSize)
 	}

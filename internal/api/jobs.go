@@ -207,6 +207,7 @@ type resultsResponse struct {
 	Available  bool                  `json:"available"`
 	Progress   job.Progress          `json:"progress"`
 	Aggregates []job.AggregateResult `json:"aggregates"`
+	Outputs    []job.Output          `json:"outputs"`
 }
 
 func (s *server) handleJobResults(w http.ResponseWriter, r *http.Request) {
@@ -225,11 +226,16 @@ func (s *server) handleJobResults(w http.ResponseWriter, r *http.Request) {
 	if aggs == nil {
 		aggs = []job.AggregateResult{}
 	}
+	outs := j.Outputs
+	if outs == nil {
+		outs = []job.Output{}
+	}
 	writeJSON(w, http.StatusOK, resultsResponse{
 		JobID:      j.ID,
 		Status:     j.Status,
 		Available:  j.Status == job.StatusCompleted,
 		Progress:   j.Progress,
 		Aggregates: aggs,
+		Outputs:    outs,
 	})
 }
