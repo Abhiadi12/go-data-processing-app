@@ -1,0 +1,601 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "datapipe API",
+    "version": "1.0.0",
+    "description": "Submit data processing jobs and follow them. A job reads CSV, JSON or HTTP sources, validates every record against a schema, transforms valid records, aggregates them, and exports the results to JSON/CSV files and SQLite.\n\nJobs run in the background: `POST /api/v1/pipelines` answers `202` at once, then you poll the job, its progress, results and errors.\n\nEvery response carries an `X-Request-ID` header. Send your own (letters, digits, `.`, `_`, `-`, up to 64 characters) to trace a request through the logs."
+  },
+  "servers": [{ "url": "/" }],
+  "tags": [
+    { "name": "jobs", "description": "Create, list, inspect and cancel pipeline jobs" },
+    { "name": "monitoring", "description": "Health and metrics" }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "tags": ["monitoring"],
+        "summary": "Liveness check",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "The server is up",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Health" } } }
+          }
+        }
+      }
+    },
+    "/api/v1/pipelines": {
+      "post": {
+        "tags": ["jobs"],
+        "summary": "Create a job",
+        "description": "Validates the job spec, saves the job as `pending` and puts it on the job queue. Every validation problem is returned at once, each with the JSON path of the field. File sources are read from the server's `DATA_DIR`; data cannot be uploaded.",
+        "operationId": "createJob",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/JobSpec" },
+              "examples": {
+                "orders": {
+                  "summary": "Full example: 2 sources, transforms, aggregations, 5 exports",
+                  "value": {
+                    "name": "daily-orders",
+                    "sources": [
+                      { "name": "orders-csv", "type": "csv", "path": "testdata/orders.csv" },
+                      { "name": "orders-json", "type": "json", "path": "testdata/orders.json" }
+                    ],
+                    "schema": {
+                      "fields": [
+                        { "name": "order_id", "type": "int", "required": true, "min": 1 },
+                        { "name": "customer", "type": "string", "required": true },
+                        { "name": "country", "type": "string", "required": true, "pattern": "^[A-Za-z]{2}$" },
+                        { "name": "category", "type": "string", "required": true, "allowed": ["books", "electronics", "toys"] },
+                        { "name": "amount", "type": "float", "required": true, "min": 0 },
+                        { "name": "quantity", "type": "int", "required": true, "min": 1 },
+                        { "name": "order_date", "type": "date", "required": true, "format": "2006-01-02" }
+                      ],
+                      "unknown_fields": "drop"
+                    },
+                    "transforms": [
+                      { "op": "trim", "fields": ["customer", "country", "category"] },
+                      { "op": "title", "fields": ["customer"] },
+                      { "op": "uppercase", "fields": ["country"] },
+                      { "op": "lowercase", "fields": ["category"] },
+                      { "op": "multiply", "fields": ["amount", "quantity"], "target": "total" },
+                      {
+                        "op": "lookup", "field": "country", "target": "region",
+                        "table": {
+                          "IN": "APAC", "JP": "APAC", "CN": "APAC", "US": "AMER", "MX": "AMER",
+                          "BR": "AMER", "GB": "EMEA", "DE": "EMEA", "FR": "EMEA", "AE": "EMEA"
+                        },
+                        "default": "OTHER"
+                      }
+                    ],
+                    "aggregations": [
+                      {
+                        "name": "by_category", "group_by": ["category"],
+                        "metrics": [
+                          { "op": "count" }, { "op": "sum", "field": "total" },
+                          { "op": "avg", "field": "amount" }, { "op": "min", "field": "amount" },
+                          { "op": "max", "field": "amount" }
+                        ]
+                      },
+                      { "name": "by_region", "group_by": ["region"], "metrics": [{ "op": "count" }, { "op": "sum", "field": "total" }] },
+                      { "name": "overall", "group_by": [], "metrics": [{ "op": "count" }, { "op": "sum", "field": "total" }] }
+                    ],
+                    "exports": [
+                      { "type": "json", "content": "records" },
+                      { "type": "csv", "content": "records" },
+                      { "type": "json", "content": "aggregates" },
+                      { "type": "sqlite", "content": "records" },
+                      { "type": "sqlite", "content": "aggregates" }
+                    ],
+                    "options": {
+                      "validate_workers": 4,
+                      "transform_workers": 4,
+                      "buffer_size": 100,
+                      "timeout_seconds": 60,
+                      "max_stored_errors": 1000,
+                      "continue_on_source_error": false
+                    }
+                  }
+                },
+                "minimal": {
+                  "summary": "Smallest useful job: one CSV source, two fields, one export",
+                  "value": {
+                    "name": "orders-minimal",
+                    "sources": [{ "name": "orders", "type": "csv", "path": "testdata/orders.csv" }],
+                    "schema": {
+                      "fields": [
+                        { "name": "order_id", "type": "int", "required": true },
+                        { "name": "amount", "type": "float", "required": true }
+                      ]
+                    },
+                    "exports": [{ "type": "json", "content": "records" }]
+                  }
+                },
+                "invalid": {
+                  "summary": "Invalid spec: shows the 400 response with every problem",
+                  "value": {
+                    "name": "broken",
+                    "sources": [{ "name": "a", "type": "csv", "path": "nope.csv" }],
+                    "schema": { "fields": [{ "name": "id", "type": "integer" }] },
+                    "exports": [{ "type": "xml", "content": "records" }]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Job accepted and queued. Poll the URL in `Location`.",
+            "headers": {
+              "Location": { "description": "URL of the new job", "schema": { "type": "string", "example": "/api/v1/pipelines/DIBF25DMOUABQE3O6S3K7E5V3L" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Job" } } }
+          },
+          "400": {
+            "description": "Malformed JSON, an unknown field, or an invalid spec",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "examples": {
+                  "invalid spec": {
+                    "value": {
+                      "error": "invalid job spec",
+                      "details": [
+                        { "field": "sources[0].path", "message": "file not found in the data directory" },
+                        { "field": "schema.fields[0].type", "message": "must be one of string, int, float, bool, date" },
+                        { "field": "exports[0].type", "message": "must be one of json, csv, sqlite" }
+                      ]
+                    }
+                  },
+                  "unknown field": { "value": { "error": "invalid json: json: unknown field \"nam\"" } }
+                }
+              }
+            }
+          },
+          "413": { "$ref": "#/components/responses/TooLarge" },
+          "415": {
+            "description": "Content-Type is not application/json",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "content type must be application/json" } } }
+          },
+          "500": { "$ref": "#/components/responses/Internal" },
+          "503": {
+            "description": "The job queue is full or the server is shutting down. The job is saved as `failed` with error `rejected: ...`.",
+            "headers": {
+              "Retry-After": { "description": "Seconds to wait before retrying", "schema": { "type": "integer", "example": 5 } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "job queue is full, try again later" } } }
+          }
+        }
+      },
+      "get": {
+        "tags": ["jobs"],
+        "summary": "List jobs",
+        "description": "All jobs, newest first, without their spec.",
+        "operationId": "listJobs",
+        "responses": {
+          "200": {
+            "description": "Job summaries",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobList" } } }
+          },
+          "500": { "$ref": "#/components/responses/Internal" }
+        }
+      }
+    },
+    "/api/v1/pipelines/{id}": {
+      "get": {
+        "tags": ["jobs"],
+        "summary": "Get a job",
+        "description": "Status, timestamps, record counts, the spec (with defaults filled in) and, once completed, the outputs written.",
+        "operationId": "getJob",
+        "parameters": [{ "$ref": "#/components/parameters/JobID" }],
+        "responses": {
+          "200": {
+            "description": "The job",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Job" } } }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/Internal" }
+        }
+      }
+    },
+    "/api/v1/pipelines/{id}/cancel": {
+      "post": {
+        "tags": ["jobs"],
+        "summary": "Cancel a job",
+        "description": "A pending job is cancelled at once (`200`). A running job is signalled to stop (`202`); it reaches `cancelled` when its pipeline has stopped, and its partial output is removed.",
+        "operationId": "cancelJob",
+        "parameters": [{ "$ref": "#/components/parameters/JobID" }],
+        "responses": {
+          "200": {
+            "description": "The job was pending and is now cancelled",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Job" } } }
+          },
+          "202": {
+            "description": "The job is running and has been told to stop",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Job" } } }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": {
+            "description": "The job has already finished",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "job has already finished" } } }
+          },
+          "500": { "$ref": "#/components/responses/Internal" }
+        }
+      }
+    },
+    "/api/v1/pipelines/{id}/errors": {
+      "get": {
+        "tags": ["jobs"],
+        "summary": "Get failed records",
+        "description": "Records that failed validation or transformation, and sources that failed. Only the first `options.max_stored_errors` are kept; `total` is always the full count. Sorted by source, then record index.",
+        "operationId": "getJobErrors",
+        "parameters": [{ "$ref": "#/components/parameters/JobID" }],
+        "responses": {
+          "200": {
+            "description": "Failed records",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorsResponse" } } }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/Internal" }
+        }
+      }
+    },
+    "/api/v1/pipelines/{id}/results": {
+      "get": {
+        "tags": ["jobs"],
+        "summary": "Get aggregation results",
+        "description": "Aggregates and outputs of a completed job. For any other status `available` is false and the lists are empty.",
+        "operationId": "getJobResults",
+        "parameters": [{ "$ref": "#/components/parameters/JobID" }],
+        "responses": {
+          "200": {
+            "description": "Results",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ResultsResponse" } } }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/Internal" }
+        }
+      }
+    },
+    "/api/v1/pipelines/{id}/progress": {
+      "get": {
+        "tags": ["jobs"],
+        "summary": "Get live progress",
+        "description": "Record counts, throughput and per-stage latency. Updated about every 500 ms while the job runs.",
+        "operationId": "getJobProgress",
+        "parameters": [{ "$ref": "#/components/parameters/JobID" }],
+        "responses": {
+          "200": {
+            "description": "Progress",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/JobProgress" } } }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "500": { "$ref": "#/components/responses/Internal" }
+        }
+      }
+    },
+    "/api/v1/metrics": {
+      "get": {
+        "tags": ["monitoring"],
+        "summary": "Service metrics",
+        "description": "Jobs by status, records processed, error rate, throughput and stage latencies across all jobs in memory.",
+        "operationId": "getMetrics",
+        "responses": {
+          "200": {
+            "description": "Metrics",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Metrics" } } }
+          },
+          "500": { "$ref": "#/components/responses/Internal" }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "JobID": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "description": "Job ID returned by create",
+        "schema": { "type": "string", "example": "DIBF25DMOUABQE3O6S3K7E5V3L" }
+      }
+    },
+    "responses": {
+      "NotFound": {
+        "description": "No job with this ID",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "job not found" } } }
+      },
+      "TooLarge": {
+        "description": "The body is larger than `MAX_BODY_BYTES`",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "request body must be at most 1048576 bytes" } } }
+      },
+      "Internal": {
+        "description": "Unexpected server error (details are logged, not returned)",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "internal server error" } } }
+      }
+    },
+    "schemas": {
+      "Health": {
+        "type": "object",
+        "properties": { "status": { "type": "string", "example": "ok" } }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": { "type": "string" },
+          "details": { "type": "array", "description": "Every validation problem, when the spec is invalid", "items": { "$ref": "#/components/schemas/Problem" } }
+        }
+      },
+      "Problem": {
+        "type": "object",
+        "properties": {
+          "field": { "type": "string", "description": "JSON path of the field", "example": "schema.fields[0].type" },
+          "message": { "type": "string", "example": "must be one of string, int, float, bool, date" }
+        }
+      },
+      "JobSpec": {
+        "type": "object",
+        "description": "What the job reads, how it checks and changes records, and where it writes them. Unknown fields are rejected.",
+        "required": ["name", "sources", "schema", "exports"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "maxLength": 100 },
+          "sources": { "type": "array", "minItems": 1, "maxItems": 20, "items": { "$ref": "#/components/schemas/Source" } },
+          "schema": { "$ref": "#/components/schemas/Schema" },
+          "transforms": { "type": "array", "description": "Applied in order to every valid record", "items": { "$ref": "#/components/schemas/Transform" } },
+          "aggregations": { "type": "array", "items": { "$ref": "#/components/schemas/Aggregation" } },
+          "exports": { "type": "array", "minItems": 1, "items": { "$ref": "#/components/schemas/Export" } },
+          "options": { "$ref": "#/components/schemas/Options" }
+        }
+      },
+      "Source": {
+        "type": "object",
+        "description": "`csv` and `json` read `path` inside the server's DATA_DIR. `http` streams `url` (http or https); private and loopback addresses are refused unless ALLOW_PRIVATE_SOURCES is set.",
+        "required": ["name", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "description": "Unique; shown in failed records" },
+          "type": { "type": "string", "enum": ["csv", "json", "http"] },
+          "path": { "type": "string", "description": "csv and json: file path relative to DATA_DIR", "example": "testdata/orders.csv" },
+          "url": { "type": "string", "description": "http: URL returning a JSON array of objects", "example": "https://example.com/orders.json" },
+          "timeout_ms": { "type": "integer", "description": "http: request timeout", "default": 10000, "maximum": 60000 },
+          "records_path": { "type": "string", "description": "json and http: key of the array when the document is an object, e.g. `data` for {\"data\": [...]}" }
+        }
+      },
+      "Schema": {
+        "type": "object",
+        "required": ["fields"],
+        "additionalProperties": false,
+        "properties": {
+          "fields": { "type": "array", "minItems": 1, "items": { "$ref": "#/components/schemas/Field" } },
+          "unknown_fields": { "type": "string", "enum": ["drop", "keep"], "default": "drop", "description": "What to do with record fields not in the schema" }
+        }
+      },
+      "Field": {
+        "type": "object",
+        "description": "Each record value is converted to `type`, then checked. A record failing any rule is dropped and stored as a failed record.",
+        "required": ["name", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "type": { "type": "string", "enum": ["string", "int", "float", "bool", "date"] },
+          "required": { "type": "boolean", "default": false },
+          "min": { "type": "number", "description": "int and float: smallest value; string: shortest length" },
+          "max": { "type": "number", "description": "int and float: largest value; string: longest length" },
+          "pattern": { "type": "string", "description": "string: regular expression the value must match" },
+          "allowed": { "type": "array", "items": { "type": "string" }, "description": "string: the only values accepted" },
+          "format": { "type": "string", "default": "2006-01-02", "description": "date: Go time layout" }
+        }
+      },
+      "Transform": {
+        "type": "object",
+        "description": "One step, chosen by `op`:\n- `trim`, `lowercase`, `uppercase`, `title`: change the string `fields`\n- `rename`: rename `from` to `to`\n- `default`: set `field` to `value` when it is missing\n- `multiply`: `target` = product of `fields` (2 or more)\n- `lookup`: `target` = `table[field]`, or `default` when not in the table",
+        "required": ["op"],
+        "additionalProperties": false,
+        "properties": {
+          "op": { "type": "string", "enum": ["trim", "lowercase", "uppercase", "title", "rename", "default", "multiply", "lookup"] },
+          "fields": { "type": "array", "items": { "type": "string" } },
+          "field": { "type": "string" },
+          "target": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "value": { "description": "default: any JSON value" },
+          "table": { "type": "object", "additionalProperties": { "type": "string" } },
+          "default": { "type": "string", "description": "lookup: value used when the key is not in the table" }
+        }
+      },
+      "Aggregation": {
+        "type": "object",
+        "required": ["name", "group_by", "metrics"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "group_by": { "type": "array", "items": { "type": "string" }, "description": "Empty array = one group for all records" },
+          "metrics": { "type": "array", "minItems": 1, "items": { "$ref": "#/components/schemas/Metric" } }
+        }
+      },
+      "Metric": {
+        "type": "object",
+        "description": "Results are named `count` or `<op>_<field>`, e.g. `sum_total`.",
+        "required": ["op"],
+        "additionalProperties": false,
+        "properties": {
+          "op": { "type": "string", "enum": ["count", "sum", "avg", "min", "max"] },
+          "field": { "type": "string", "description": "Required for every op except count" }
+        }
+      },
+      "Export": {
+        "type": "object",
+        "description": "Files go to OUTPUT_DIR/<job-id>/; SQLite rows go to the job_records and job_aggregates tables. Exports are written only when the job completes; a failed or cancelled job leaves nothing behind.",
+        "required": ["type", "content"],
+        "additionalProperties": false,
+        "properties": {
+          "type": { "type": "string", "enum": ["json", "csv", "sqlite"] },
+          "content": { "type": "string", "enum": ["records", "aggregates"], "description": "`aggregates` needs at least one aggregation" }
+        }
+      },
+      "Options": {
+        "type": "object",
+        "description": "0 or missing means the default.",
+        "additionalProperties": false,
+        "properties": {
+          "validate_workers": { "type": "integer", "default": 4, "maximum": 32 },
+          "transform_workers": { "type": "integer", "default": 4, "maximum": 32 },
+          "buffer_size": { "type": "integer", "default": 100, "maximum": 5000, "description": "Capacity of each channel between stages" },
+          "timeout_seconds": { "type": "integer", "default": 60, "maximum": 3600 },
+          "max_stored_errors": { "type": "integer", "default": 1000, "maximum": 100000 },
+          "continue_on_source_error": { "type": "boolean", "default": false, "description": "Keep going when a source cannot be read" }
+        }
+      },
+      "Status": {
+        "type": "string",
+        "enum": ["pending", "running", "completed", "failed", "cancelled"]
+      },
+      "Counts": {
+        "type": "object",
+        "properties": {
+          "records_read": { "type": "integer", "example": 15 },
+          "records_valid": { "type": "integer", "example": 7 },
+          "records_failed": { "type": "integer", "example": 8 },
+          "source_errors": { "type": "integer", "example": 0 }
+        }
+      },
+      "Job": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "example": "DIBF25DMOUABQE3O6S3K7E5V3L" },
+          "name": { "type": "string", "example": "daily-orders" },
+          "status": { "$ref": "#/components/schemas/Status" },
+          "request_id": { "type": "string", "description": "X-Request-ID of the request that created the job" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "started_at": { "type": "string", "format": "date-time" },
+          "finished_at": { "type": "string", "format": "date-time" },
+          "error": { "type": "string", "description": "Why the job failed or was cancelled", "example": "timed out after 1m0s" },
+          "progress": { "$ref": "#/components/schemas/Counts" },
+          "spec": { "$ref": "#/components/schemas/JobSpec" },
+          "outputs": { "type": "array", "items": { "$ref": "#/components/schemas/Output" } }
+        }
+      },
+      "JobSummary": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/Status" },
+          "created_at": { "type": "string", "format": "date-time" },
+          "started_at": { "type": "string", "format": "date-time" },
+          "finished_at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "JobList": {
+        "type": "object",
+        "properties": {
+          "count": { "type": "integer" },
+          "jobs": { "type": "array", "items": { "$ref": "#/components/schemas/JobSummary" } }
+        }
+      },
+      "Output": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "enum": ["json", "csv", "sqlite"] },
+          "content": { "type": "string", "enum": ["records", "aggregates"] },
+          "location": { "type": "string", "description": "File path, or table name for sqlite", "example": "data/output/DIBF25DMOUABQE3O6S3K7E5V3L/records.json" },
+          "rows": { "type": "integer", "example": 7 }
+        }
+      },
+      "RecordError": {
+        "type": "object",
+        "properties": {
+          "source": { "type": "string", "example": "orders-csv" },
+          "index": { "type": "integer", "description": "1-based record number in the source; missing for a source error", "example": 3 },
+          "stage": { "type": "string", "enum": ["source", "ingest", "validate", "transform"], "description": "`source`: the source could not be read; `ingest`: a row could not be parsed", "example": "validate" },
+          "reasons": { "type": "array", "items": { "type": "string" }, "example": ["amount: must be a number"] },
+          "record": { "type": "object", "additionalProperties": true, "description": "The record as read", "example": { "order_id": "1003", "amount": "abc" } }
+        }
+      },
+      "ErrorsResponse": {
+        "type": "object",
+        "properties": {
+          "job_id": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/Status" },
+          "total": { "type": "integer", "description": "All failed records plus source errors", "example": 8 },
+          "stored": { "type": "integer", "description": "How many are in `errors`", "example": 8 },
+          "complete": { "type": "boolean", "description": "True once the job has finished, so the list will not grow" },
+          "errors": { "type": "array", "items": { "$ref": "#/components/schemas/RecordError" } }
+        }
+      },
+      "AggregateResult": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "example": "by_region" },
+          "group_by": { "type": "array", "items": { "type": "string" }, "example": ["region"] },
+          "groups": {
+            "type": "array",
+            "description": "Sorted by group key",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": { "type": "object", "additionalProperties": true, "example": { "region": "APAC" } },
+                "metrics": { "type": "object", "additionalProperties": { "type": "number" }, "example": { "count": 4, "sum_total": 1862 } }
+              }
+            }
+          }
+        }
+      },
+      "ResultsResponse": {
+        "type": "object",
+        "properties": {
+          "job_id": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/Status" },
+          "available": { "type": "boolean", "description": "True only for completed jobs" },
+          "progress": { "$ref": "#/components/schemas/Counts" },
+          "aggregates": { "type": "array", "items": { "$ref": "#/components/schemas/AggregateResult" } },
+          "outputs": { "type": "array", "items": { "$ref": "#/components/schemas/Output" } }
+        }
+      },
+      "StageStat": {
+        "type": "object",
+        "properties": {
+          "stage": { "type": "string", "enum": ["validate", "transform", "sink"] },
+          "records": { "type": "integer", "example": 15 },
+          "avg_micros": { "type": "number", "example": 30.68 },
+          "max_micros": { "type": "number", "example": 127.63 }
+        }
+      },
+      "JobProgress": {
+        "type": "object",
+        "properties": {
+          "job_id": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/Status" },
+          "counts": { "$ref": "#/components/schemas/Counts" },
+          "elapsed_seconds": { "type": "number", "example": 0.02 },
+          "records_per_second": { "type": "number", "example": 755.36 },
+          "percent_complete": { "type": "number", "nullable": true, "description": "0 while pending, 100 once completed, null while running (the total is not known in advance)", "example": 100 },
+          "stages": { "type": "array", "items": { "$ref": "#/components/schemas/StageStat" } }
+        }
+      },
+      "Metrics": {
+        "type": "object",
+        "properties": {
+          "jobs": {
+            "type": "object",
+            "description": "Number of jobs per status",
+            "additionalProperties": { "type": "integer" },
+            "example": { "pending": 0, "running": 0, "completed": 1, "failed": 0, "cancelled": 0 }
+          },
+          "records": { "$ref": "#/components/schemas/Counts" },
+          "error_rate": { "type": "number", "description": "(Failed records + source errors) / records read", "example": 0.5333 },
+          "records_per_second": { "type": "number", "example": 755.36 },
+          "stages": { "type": "array", "items": { "$ref": "#/components/schemas/StageStat" } },
+          "uptime_seconds": { "type": "number", "example": 11 },
+          "goroutines": { "type": "integer", "example": 9 }
+        }
+      }
+    }
+  }
+}

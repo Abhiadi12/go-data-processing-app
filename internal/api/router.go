@@ -38,15 +38,11 @@ func NewHandler(opts Options) http.Handler {
 	s := &server{logger: opts.Logger, store: opts.Store, runner: opts.Runner, files: opts.Files, started: time.Now()}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("POST /api/v1/pipelines", s.handleCreateJob)
-	mux.HandleFunc("GET /api/v1/pipelines", s.handleListJobs)
-	mux.HandleFunc("GET /api/v1/pipelines/{id}", s.handleGetJob)
-	mux.HandleFunc("POST /api/v1/pipelines/{id}/cancel", s.handleCancelJob)
-	mux.HandleFunc("GET /api/v1/pipelines/{id}/errors", s.handleJobErrors)
-	mux.HandleFunc("GET /api/v1/pipelines/{id}/results", s.handleJobResults)
-	mux.HandleFunc("GET /api/v1/pipelines/{id}/progress", s.handleJobProgress)
-	mux.HandleFunc("GET /api/v1/metrics", s.handleMetrics)
+	for _, rt := range s.routes() {
+		mux.HandleFunc(rt.pattern, rt.handler)
+	}
+	mux.HandleFunc("GET /openapi.json", handleOpenAPI)
+	mux.HandleFunc("GET /docs", handleDocs)
 
 	return chain(mux,
 		requestID,
@@ -55,6 +51,25 @@ func NewHandler(opts Options) http.Handler {
 		securityHeaders,
 		limitBody(opts.MaxBodyBytes),
 	)
+}
+
+type route struct {
+	pattern string
+	handler http.HandlerFunc
+}
+
+func (s *server) routes() []route {
+	return []route{
+		{"GET /healthz", s.handleHealth},
+		{"POST /api/v1/pipelines", s.handleCreateJob},
+		{"GET /api/v1/pipelines", s.handleListJobs},
+		{"GET /api/v1/pipelines/{id}", s.handleGetJob},
+		{"POST /api/v1/pipelines/{id}/cancel", s.handleCancelJob},
+		{"GET /api/v1/pipelines/{id}/errors", s.handleJobErrors},
+		{"GET /api/v1/pipelines/{id}/results", s.handleJobResults},
+		{"GET /api/v1/pipelines/{id}/progress", s.handleJobProgress},
+		{"GET /api/v1/metrics", s.handleMetrics},
+	}
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
