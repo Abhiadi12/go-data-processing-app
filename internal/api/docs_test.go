@@ -22,6 +22,9 @@ type openAPIDoc struct {
 
 func loadOpenAPI(t *testing.T) openAPIDoc {
 	t.Helper()
+	if len(openAPISpec) == 0 {
+		t.Fatal("openAPISpec is empty: the //go:embed openapi.json line above it in docs.go is missing")
+	}
 	var doc openAPIDoc
 	if err := json.Unmarshal(openAPISpec, &doc); err != nil {
 		t.Fatalf("openapi.json is not valid json: %v", err)

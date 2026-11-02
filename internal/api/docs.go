@@ -7,6 +7,7 @@ import (
 	"net/http"
 )
 
+//go:embed openapi.json
 var openAPISpec []byte
 
 const (
