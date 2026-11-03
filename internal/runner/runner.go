@@ -22,6 +22,8 @@ var (
 	ErrQueueFull   = errors.New("job queue is full")
 	ErrStopped     = errors.New("runner is shutting down")
 	ErrJobFinished = errors.New("job has already finished")
+	ErrJobActive   = errors.New("job is still pending or running")
+	ErrBusy        = errors.New("the database is busy with another job")
 
 	errCancelledByUser = errors.New("cancelled by user")
 	errShutdown        = errors.New("server shutting down")
@@ -36,15 +38,22 @@ type Options struct {
 	Workers          int
 	QueueSize        int
 	ProgressInterval time.Duration
+
+	JobTTL        time.Duration
+	EvictInterval time.Duration
 }
 
+const deleteTimeout = 5 * time.Second
+
 type Runner struct {
-	store    job.Store
-	deps     job.SourceDeps
-	exports  export.Deps
-	logger   *slog.Logger
-	workers  int
-	interval time.Duration
+	store      job.Store
+	deps       job.SourceDeps
+	exports    export.Deps
+	logger     *slog.Logger
+	workers    int
+	interval   time.Duration
+	ttl        time.Duration
+	evictEvery time.Duration
 
 	queue chan string
 	base  context.Context
@@ -60,25 +69,35 @@ func New(opts Options) *Runner {
 	if opts.ProgressInterval <= 0 {
 		opts.ProgressInterval = 500 * time.Millisecond
 	}
+	if opts.EvictInterval <= 0 {
+		opts.EvictInterval = time.Minute
+	}
 	return &Runner{
-		store:    opts.Store,
-		deps:     opts.Deps,
-		exports:  opts.Exports,
-		logger:   opts.Logger,
-		workers:  opts.Workers,
-		interval: opts.ProgressInterval,
-		queue:    make(chan string, opts.QueueSize),
-		base:     base,
-		stop:     stop,
-		running:  make(map[string]context.CancelCauseFunc),
+		store:      opts.Store,
+		deps:       opts.Deps,
+		exports:    opts.Exports,
+		logger:     opts.Logger,
+		workers:    opts.Workers,
+		interval:   opts.ProgressInterval,
+		ttl:        opts.JobTTL,
+		evictEvery: opts.EvictInterval,
+		queue:      make(chan string, opts.QueueSize),
+		base:       base,
+		stop:       stop,
+		running:    make(map[string]context.CancelCauseFunc),
 	}
 }
 
-// Start launches the worker goroutines. Call it once.
+// Start launches the worker goroutines and, when a TTL is set, the eviction
+// loop. Call it once.
 func (r *Runner) Start() {
 	for range r.workers {
 		r.wg.Add(1)
 		go r.work()
+	}
+	if r.ttl > 0 {
+		r.wg.Add(1)
+		go r.evictLoop()
 	}
 }
 
@@ -129,7 +148,7 @@ func (r *Runner) Cancel(ctx context.Context, id string) (job.Job, error) {
 
 // Shutdown stops taking jobs, cancels running ones and waits for the workers
 // to finish recording their final status, or for ctx to expire.
-// Jobs still in the queue stay pending.
+// Jobs still in the queue stay pending; nothing new is started.
 func (r *Runner) Shutdown(ctx context.Context) error {
 	r.stop(errShutdown)
 
@@ -154,8 +173,66 @@ func (r *Runner) work() {
 		case <-r.base.Done():
 			return
 		case id := <-r.queue:
+			if r.base.Err() != nil {
+				return
+			}
 			r.run(id)
 		}
+	}
+}
+
+func (r *Runner) Delete(ctx context.Context, id string) error {
+	j, err := r.store.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if !j.Finished() {
+		return ErrJobActive
+	}
+
+	removeCtx, cancel := context.WithTimeout(ctx, deleteTimeout)
+	defer cancel()
+	if err := export.Remove(removeCtx, j, r.exports); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return ErrBusy
+		}
+		return fmt.Errorf("remove outputs: %w", err)
+	}
+	return r.store.Delete(ctx, id)
+}
+
+func (r *Runner) evictLoop() {
+	defer r.wg.Done()
+	t := time.NewTicker(r.evictEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-r.base.Done():
+			return
+		case now := <-t.C:
+			r.evict(now)
+		}
+	}
+}
+func (r *Runner) evict(now time.Time) {
+	jobs, err := r.store.List(r.base)
+	if err != nil {
+		r.logger.Warn("list jobs for eviction", "err", err)
+		return
+	}
+	evicted := 0
+	for _, j := range jobs {
+		if !j.Finished() || j.FinishedAt == nil || now.Sub(*j.FinishedAt) < r.ttl {
+			continue
+		}
+		if err := r.store.Delete(r.base, j.ID); err != nil && !errors.Is(err, job.ErrNotFound) {
+			r.logger.Warn("evict job", "job_id", j.ID, "err", err)
+			continue
+		}
+		evicted++
+	}
+	if evicted > 0 {
+		r.logger.Info("evicted finished jobs", "count", evicted, "ttl", r.ttl.String())
 	}
 }
 

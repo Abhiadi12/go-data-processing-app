@@ -143,6 +143,25 @@ func TestMemoryStoreUpdate(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreDelete(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemoryStore()
+	j := New(validSpec(), "")
+	if err := s.Create(ctx, j); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Delete(ctx, j.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := s.Get(ctx, j.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("get after delete: err = %v, want ErrNotFound", err)
+	}
+	if err := s.Delete(ctx, j.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("second delete: err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestJobFinished(t *testing.T) {
 	for status, want := range map[Status]bool{
 		StatusPending: false, StatusRunning: false,

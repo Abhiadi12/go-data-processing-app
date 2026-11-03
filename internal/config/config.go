@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -29,10 +30,16 @@ type Config struct {
 
 	JobWorkers   int
 	JobQueueSize int
+	JobTTL       time.Duration
 
 	OutputDir  string
 	SQLitePath string
+
+	APIKey      string
+	CORSOrigins []string
 }
+
+const minAPIKeyLength = 16
 
 // Load reads the configuration through getenv (os.Getenv in production)
 // and returns every invalid setting at once.
@@ -57,9 +64,17 @@ func Load(getenv func(string) string) (Config, error) {
 
 		JobWorkers:   l.count("JOB_WORKERS", 2, 64),
 		JobQueueSize: l.count("JOB_QUEUE_SIZE", 100, 10000),
+		JobTTL:       l.duration("JOB_TTL", 24*time.Hour),
 
 		OutputDir:  l.str("OUTPUT_DIR", "data/output"),
 		SQLitePath: l.str("SQLITE_PATH", "data/datapipe.db"),
+
+		APIKey:      l.str("API_KEY", ""),
+		CORSOrigins: l.origins("CORS_ALLOWED_ORIGINS"),
+	}
+
+	if cfg.APIKey != "" && len(cfg.APIKey) < minAPIKeyLength {
+		l.fail("API_KEY", "(hidden)", fmt.Sprintf("must be at least %d characters", minAPIKeyLength))
 	}
 
 	if p, err := strconv.Atoi(cfg.Port); err != nil || p < 1 || p > 65535 {
@@ -149,6 +164,27 @@ func (l *loader) count(key string, def, maxValue int) int {
 		return def
 	}
 	return n
+}
+
+func (l *loader) origins(key string) []string {
+	v := l.str(key, "")
+	if v == "" {
+		return nil
+	}
+	var out []string
+	for o := range strings.SplitSeq(v, ",") {
+		o = strings.TrimSpace(o)
+		if o == "" {
+			continue
+		}
+		u, err := url.Parse(o)
+		if o != "*" && (err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Path != "" || u.RawQuery != "") {
+			l.fail(key, o, `must be "*" or origins like http://localhost:3000, separated by commas`)
+			continue
+		}
+		out = append(out, o)
+	}
+	return out
 }
 
 func (l *loader) boolean(key string, def bool) bool {

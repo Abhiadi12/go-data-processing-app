@@ -138,6 +138,20 @@ func TestOpenAPIExamplesAreValidSpecs(t *testing.T) {
 	})
 }
 
+func TestOpenAPIDescribesAPIKey(t *testing.T) {
+	var scheme struct {
+		Type string `json:"type"`
+		In   string `json:"in"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(loadOpenAPI(t).Components["securitySchemes"]["ApiKey"], &scheme); err != nil {
+		t.Fatalf("ApiKey security scheme: %v", err)
+	}
+	if scheme.Type != "apiKey" || scheme.In != "header" || scheme.Name != apiKeyHeader {
+		t.Errorf("scheme = %+v, want an apiKey in header %s", scheme, apiKeyHeader)
+	}
+}
+
 func TestOpenAPIEndpoint(t *testing.T) {
 	rec := do(t, newTestHandler(t, nil), http.MethodGet, "/openapi.json", "")
 

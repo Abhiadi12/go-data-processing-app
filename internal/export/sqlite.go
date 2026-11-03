@@ -135,6 +135,24 @@ func insertRows(ctx context.Context, tx *sql.Tx, table string, columns []string,
 	return nil
 }
 
+func deleteRows(ctx context.Context, db *sql.DB, jobID string) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, q := range []string{
+		`DELETE FROM job_records WHERE job_id = ?`,
+		`DELETE FROM job_aggregates WHERE job_id = ?`,
+	} {
+		if _, err := tx.ExecContext(ctx, q, jobID); err != nil {
+			return fmt.Errorf("delete sqlite rows: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
 // sqliteRecords buffers records and inserts them batchSize at a time inside
 // the job's transaction, so memory stays bounded for large jobs. ctx is the
 // job's context, kept because write is called per record without one.

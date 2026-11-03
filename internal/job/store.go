@@ -23,6 +23,7 @@ type Store interface {
 	// so a read-check-write (e.g. "only start if still pending") cannot race.
 	// If fn returns an error nothing is saved and that error is returned.
 	Update(ctx context.Context, id string, fn func(*Job) error) (Job, error)
+	Delete(ctx context.Context, id string) error
 }
 
 var _ Store = (*MemoryStore)(nil)
@@ -73,6 +74,17 @@ func (s *MemoryStore) Update(_ context.Context, id string, fn func(*Job) error) 
 	}
 	s.jobs[id] = j
 	return j, nil
+}
+
+func (s *MemoryStore) Delete(_ context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.jobs[id]; !ok {
+		return ErrNotFound
+	}
+	delete(s.jobs, id)
+	return nil
 }
 
 // List returns all jobs, newest first.

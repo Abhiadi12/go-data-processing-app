@@ -177,6 +177,36 @@ func (s *Set) Abort() {
 	}
 }
 
+// Remove deletes everything a finished job exported: its SQLite rows first
+// (the step that can fail, for example when another job holds the database),
+// then its output directory. Running it twice is harmless.
+func Remove(ctx context.Context, j job.Job, deps Deps) error {
+	if j.Status == job.StatusCompleted && usesSQLite(j.Spec.Exports) {
+		if deps.DB == nil {
+			return ErrNoDatabase
+		}
+		if err := deleteRows(ctx, deps.DB, j.ID); err != nil {
+			return err
+		}
+	}
+	if deps.OutputDir == "" {
+		return nil
+	}
+	if !filepath.IsLocal(j.ID) {
+		return fmt.Errorf("invalid job id %q", j.ID)
+	}
+	return os.RemoveAll(filepath.Join(deps.OutputDir, j.ID))
+}
+
+func usesSQLite(exps []job.Export) bool {
+	for _, e := range exps {
+		if e.Type == "sqlite" {
+			return true
+		}
+	}
+	return false
+}
+
 // formatter turns record values into plain values for JSON, CSV and SQLite.
 // Dates are written in the layout their schema field declares.
 type formatter struct {

@@ -1,0 +1,16 @@
+services:
+  datapipe:
+    build: .
+    image: datapipe:local
+    ports:
+      - "9090:9090"
+    environment:
+      LOG_FORMAT: text
+      API_KEY: ${API_KEY:-}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+    volumes:
+      - datapipe-data:/var/lib/datapipe
+    restart: unless-stopped
+
+volumes:
+  datapipe-data:

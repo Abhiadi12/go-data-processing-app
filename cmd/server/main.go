@@ -61,6 +61,7 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		Exports:   export.Deps{OutputDir: cfg.OutputDir, DB: db},
 		Workers:   cfg.JobWorkers,
 		QueueSize: cfg.JobQueueSize,
+		JobTTL:    cfg.JobTTL,
 	})
 	jobs.Start()
 
@@ -70,6 +71,8 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		Runner:       jobs,
 		Files:        dataRoot.FS(),
 		MaxBodyBytes: cfg.MaxBodyBytes,
+		APIKey:       cfg.APIKey,
+		CORSOrigins:  cfg.CORSOrigins,
 	})
 
 	srv := &http.Server{
@@ -89,7 +92,8 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	go func() {
 		logger.Info("listening", "addr", srv.Addr, "data_dir", cfg.DataDir, "log_level", cfg.LogLevel.String(),
 			"job_workers", cfg.JobWorkers, "job_queue_size", cfg.JobQueueSize,
-			"output_dir", cfg.OutputDir, "sqlite_path", cfg.SQLitePath)
+			"output_dir", cfg.OutputDir, "sqlite_path", cfg.SQLitePath, "job_ttl", cfg.JobTTL.String(),
+			"api_key_required", cfg.APIKey != "", "cors_origins", cfg.CORSOrigins)
 		errCh <- srv.ListenAndServe()
 	}()
 

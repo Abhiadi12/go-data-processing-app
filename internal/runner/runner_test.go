@@ -339,6 +339,141 @@ func TestRunnerExportsToSQLite(t *testing.T) {
 	}
 }
 
+func TestWorkerDoesNotStartJobsAfterShutdown(t *testing.T) {
+	for range 30 {
+		store := job.NewMemoryStore()
+		r := New(Options{Store: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), QueueSize: 1})
+
+		j := job.New(httpSpec("http://unused"), "")
+		if err := store.Create(context.Background(), j); err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Submit(j.ID); err != nil {
+			t.Fatal(err)
+		}
+		r.stop(errShutdown)
+
+		r.wg.Add(1)
+		r.work()
+
+		if got, _ := store.Get(context.Background(), j.ID); got.Status != job.StatusPending || got.StartedAt != nil {
+			t.Fatalf("a queued job was started after shutdown began: status %s", got.Status)
+		}
+	}
+}
+
+func TestRunnerDelete(t *testing.T) {
+	data, err := os.ReadFile("../../examples/orders-job.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spec job.Spec
+	if err := json.Unmarshal(data, &spec); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newSetup(t, 1, 10, job.SourceDeps{Files: os.DirFS("../..")})
+	id := s.submit(t, spec)
+	s.waitFor(t, id, finished)
+
+	if err := s.runner.Delete(context.Background(), id); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := s.store.Get(context.Background(), id); !errors.Is(err, job.ErrNotFound) {
+		t.Errorf("job still in the store: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.outDir, id)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("output directory still there: %v", err)
+	}
+	var rows int
+	_ = s.db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM job_records WHERE job_id = ?", id).Scan(&rows)
+	if rows != 0 {
+		t.Errorf("%d sqlite rows left", rows)
+	}
+	if err := s.runner.Delete(context.Background(), id); !errors.Is(err, job.ErrNotFound) {
+		t.Errorf("second delete: err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRunnerDeleteRefusesActiveJobs(t *testing.T) {
+	s := newSetup(t, 1, 10, httpDeps())
+	srv := slowServer(t)
+
+	running := s.submit(t, httpSpec(srv.URL))
+	s.waitFor(t, running, func(j job.Job) bool { return j.Status == job.StatusRunning })
+	pending := s.submit(t, httpSpec(srv.URL))
+
+	for _, id := range []string{running, pending} {
+		if err := s.runner.Delete(context.Background(), id); !errors.Is(err, ErrJobActive) {
+			t.Errorf("delete %s: err = %v, want ErrJobActive", id, err)
+		}
+	}
+	for _, id := range []string{pending, running} {
+		if _, err := s.runner.Cancel(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.waitFor(t, running, finished)
+}
+
+func TestRunnerEvictsOldFinishedJobs(t *testing.T) {
+	store := job.NewMemoryStore()
+	r := New(Options{Store: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), JobTTL: time.Hour})
+	now := time.Now()
+	old, recent := now.Add(-2*time.Hour), now.Add(-time.Minute)
+
+	jobs := map[string]job.Job{
+		"old-done":    {ID: "old-done", Status: job.StatusCompleted, FinishedAt: &old},
+		"old-failed":  {ID: "old-failed", Status: job.StatusFailed, FinishedAt: &old},
+		"recent-done": {ID: "recent-done", Status: job.StatusCompleted, FinishedAt: &recent},
+		"running":     {ID: "running", Status: job.StatusRunning, StartedAt: &old},
+		"pending":     {ID: "pending", Status: job.StatusPending},
+	}
+	for _, j := range jobs {
+		if err := store.Create(context.Background(), j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r.evict(now)
+
+	for id := range jobs {
+		_, err := store.Get(context.Background(), id)
+		gone := errors.Is(err, job.ErrNotFound)
+		if want := strings.HasPrefix(id, "old-"); gone != want {
+			t.Errorf("%s: evicted = %v, want %v", id, gone, want)
+		}
+	}
+}
+
+func TestRunnerEvictLoopRunsAndStops(t *testing.T) {
+	store := job.NewMemoryStore()
+	old := time.Now().Add(-time.Hour)
+	if err := store.Create(context.Background(), job.Job{ID: "a", Status: job.StatusCompleted, FinishedAt: &old}); err != nil {
+		t.Fatal(err)
+	}
+	r := New(Options{Store: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		JobTTL: time.Minute, EvictInterval: 10 * time.Millisecond})
+	r.Start()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := store.Get(context.Background(), "a"); errors.Is(err, job.ErrNotFound) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("job was never evicted")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := r.Shutdown(ctx); err != nil {
+		t.Errorf("eviction loop did not stop on shutdown: %v", err)
+	}
+}
+
 func TestRunnerFailsWhenExportCannotOpen(t *testing.T) {
 	s := newSetup(t, 1, 10, job.SourceDeps{Files: fstest.MapFS{"a.json": {Data: []byte(`[{"id":1}]`)}}})
 	s.runner.exports.OutputDir = filepath.Join(s.outDir, "file-not-dir")
