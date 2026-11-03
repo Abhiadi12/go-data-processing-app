@@ -134,7 +134,7 @@ func cors(allowed []string) middleware {
 	}
 }
 
-const apiKeyHeader = "X-API-Key"
+const apiKeyHeader = "X-API-Key" //nolint:gosec // G101: a header name, not a credential
 
 func requireAPIKey(key string) middleware {
 	want := sha256.Sum256([]byte(key))

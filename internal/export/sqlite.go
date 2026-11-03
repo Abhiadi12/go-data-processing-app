@@ -140,7 +140,7 @@ func deleteRows(ctx context.Context, db *sql.DB, jobID string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
 
 	for _, q := range []string{
 		`DELETE FROM job_records WHERE job_id = ?`,
