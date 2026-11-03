@@ -1,7 +1,6 @@
 // Package job holds the job specification, the job model and the job store.
 package job
 
-// Spec is the body of POST /api/v1/pipelines. See docs/job-spec.md.
 type Spec struct {
 	Name         string        `json:"name"`
 	Sources      []SourceSpec  `json:"sources"`
