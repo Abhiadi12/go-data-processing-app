@@ -31,6 +31,53 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ReadTimeout != 15*time.Second || cfg.ShutdownTimeout != 10*time.Second {
 		t.Errorf("got read %v shutdown %v", cfg.ReadTimeout, cfg.ShutdownTimeout)
 	}
+	if cfg.JobTTL != 24*time.Hour || cfg.APIKey != "" || cfg.CORSOrigins != nil {
+		t.Errorf("got ttl %v api key %q cors %v", cfg.JobTTL, cfg.APIKey, cfg.CORSOrigins)
+	}
+}
+
+func TestLoadSecuritySettings(t *testing.T) {
+	cfg, err := Load(env(map[string]string{
+		"API_KEY":              "0123456789abcdef",
+		"CORS_ALLOWED_ORIGINS": " http://localhost:3000 , https://app.example.com,",
+		"JOB_TTL":              "30m",
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.APIKey != "0123456789abcdef" || cfg.JobTTL != 30*time.Minute {
+		t.Errorf("got api key %q ttl %v", cfg.APIKey, cfg.JobTTL)
+	}
+	if strings.Join(cfg.CORSOrigins, "|") != "http://localhost:3000|https://app.example.com" {
+		t.Errorf("cors origins = %q", cfg.CORSOrigins)
+	}
+
+	if cfg, err := Load(env(map[string]string{"CORS_ALLOWED_ORIGINS": "*"})); err != nil || cfg.CORSOrigins[0] != "*" {
+		t.Errorf("wildcard: %v, %v", cfg.CORSOrigins, err)
+	}
+}
+
+func TestLoadRejectsBadSecuritySettings(t *testing.T) {
+	_, err := Load(env(map[string]string{
+		"API_KEY":              "short-secret",
+		"CORS_ALLOWED_ORIGINS": "localhost:3000,https://ok.example,https://x.example/path",
+		"JOB_TTL":              "forever",
+	}))
+	if err == nil {
+		t.Fatal("want an error, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{"API_KEY=", "at least 16", `CORS_ALLOWED_ORIGINS="localhost:3000"`, `CORS_ALLOWED_ORIGINS="https://x.example/path"`, "JOB_TTL="} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error does not mention %s:\n%v", want, msg)
+		}
+	}
+	if strings.Contains(msg, "short-secret") {
+		t.Error("the API key value was printed in the error")
+	}
+	if strings.Contains(msg, "https://ok.example") {
+		t.Error("a valid origin was reported as invalid")
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {

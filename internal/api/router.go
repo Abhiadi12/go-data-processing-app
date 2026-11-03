@@ -18,6 +18,11 @@ type Options struct {
 	Runner       JobRunner
 	Files        fs.FS
 	MaxBodyBytes int64
+
+	// APIKey, when set, is required in the X-API-Key header on /api/ routes.
+	APIKey string
+	// CORSOrigins are the browser origins allowed to call the API ("*" for any).
+	CORSOrigins []string
 }
 
 type server struct {
@@ -32,6 +37,7 @@ type server struct {
 type JobRunner interface {
 	Submit(id string) error
 	Cancel(ctx context.Context, id string) (job.Job, error)
+	Delete(ctx context.Context, id string) error
 }
 
 func NewHandler(opts Options) http.Handler {
@@ -49,6 +55,8 @@ func NewHandler(opts Options) http.Handler {
 		logRequests(opts.Logger),
 		recoverPanic(opts.Logger),
 		securityHeaders,
+		cors(opts.CORSOrigins),
+		requireAPIKey(opts.APIKey),
 		limitBody(opts.MaxBodyBytes),
 	)
 }
@@ -64,6 +72,7 @@ func (s *server) routes() []route {
 		{"POST /api/v1/pipelines", s.handleCreateJob},
 		{"GET /api/v1/pipelines", s.handleListJobs},
 		{"GET /api/v1/pipelines/{id}", s.handleGetJob},
+		{"DELETE /api/v1/pipelines/{id}", s.handleDeleteJob},
 		{"POST /api/v1/pipelines/{id}/cancel", s.handleCancelJob},
 		{"GET /api/v1/pipelines/{id}/errors", s.handleJobErrors},
 		{"GET /api/v1/pipelines/{id}/results", s.handleJobResults},

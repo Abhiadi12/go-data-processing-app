@@ -305,6 +305,70 @@ func TestSQLiteOpenGivesUpWhenCancelled(t *testing.T) {
 	}
 }
 
+func TestRemoveDeletesFilesAndRows(t *testing.T) {
+	db := openTestDB(t)
+	root := t.TempDir()
+	deps := Deps{OutputDir: root, DB: db}
+
+	exports := append(allFileExports(), job.Export{Type: "sqlite", Content: "records"}, job.Export{Type: "sqlite", Content: "aggregates"})
+	for _, id := range []string{"KEEP", "GONE"} {
+		set, err := Open(t.Context(), testJob(id, exports...), deps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = set.WriteRecord(order(1, 1))
+		if _, err := set.Commit(t.Context(), testAggs); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	gone := testJob("GONE", exports...)
+	gone.Status = job.StatusCompleted
+	if err := Remove(t.Context(), gone, deps); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if err := Remove(t.Context(), gone, deps); err != nil {
+		t.Errorf("second remove: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(root, "GONE")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("output directory still there: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "KEEP", "records.json")); err != nil {
+		t.Errorf("another job's files were removed: %v", err)
+	}
+	for _, table := range []string{"job_records", "job_aggregates"} {
+		if n := count(t, db, "SELECT COUNT(*) FROM "+table+" WHERE job_id = 'GONE'"); n != 0 {
+			t.Errorf("%s still has %d rows for the removed job", table, n)
+		}
+		if n := count(t, db, "SELECT COUNT(*) FROM "+table+" WHERE job_id = 'KEEP'"); n != 1 {
+			t.Errorf("%s has %d rows for the other job, want 1", table, n)
+		}
+	}
+}
+
+func TestRemoveWaitsForDatabaseThenGivesUp(t *testing.T) {
+	db := openTestDB(t)
+	busy, err := Open(t.Context(), testJob("BUSY", job.Export{Type: "sqlite", Content: "records"}), Deps{DB: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Abort()
+
+	j := testJob("OLD", job.Export{Type: "sqlite", Content: "records"})
+	j.Status = job.StatusCompleted
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	if err := Remove(ctx, j, Deps{DB: db}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want DeadlineExceeded while another job holds the database", err)
+	}
+
+	j.Status = job.StatusFailed
+	if err := Remove(ctx, j, Deps{DB: db}); err != nil {
+		t.Errorf("a failed job committed no rows, so it must not wait for the database: %v", err)
+	}
+}
+
 func readJSON(t *testing.T, path string, v any) {
 	t.Helper()
 	b, err := os.ReadFile(path)

@@ -2,11 +2,15 @@ package api
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
 	"log/slog"
 	"net/http"
 	"regexp"
 	"runtime/debug"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/Abhiadi12/go-data-processing-app/internal/logging"
@@ -97,6 +101,58 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Cache-Control", "no-store")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// cors lets browsers on the allowed origins call the API. Requests from other
+// origins get no CORS headers, so the browser blocks them.
+func cors(allowed []string) middleware {
+	allowAll := slices.Contains(allowed, "*")
+	return func(next http.Handler) http.Handler {
+		if len(allowed) == 0 {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := w.Header()
+			h.Add("Vary", "Origin")
+			origin := r.Header.Get("Origin")
+			if origin == "" || (!allowAll && !slices.Contains(allowed, origin)) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			h.Set("Access-Control-Allow-Origin", origin)
+			h.Set("Access-Control-Expose-Headers", "Location, Retry-After, X-Request-ID")
+			if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
+				h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE")
+				h.Set("Access-Control-Allow-Headers", "Content-Type, X-API-Key, X-Request-ID")
+				h.Set("Access-Control-Max-Age", "600")
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+const apiKeyHeader = "X-API-Key"
+
+func requireAPIKey(key string) middleware {
+	want := sha256.Sum256([]byte(key))
+	return func(next http.Handler) http.Handler {
+		if key == "" {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				got := sha256.Sum256([]byte(r.Header.Get(apiKeyHeader)))
+				if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
+					writeError(w, http.StatusUnauthorized, "missing or invalid API key")
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func limitBody(maxBytes int64) middleware {

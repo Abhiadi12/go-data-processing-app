@@ -232,6 +232,99 @@ func TestCancelJob(t *testing.T) {
 	}
 }
 
+func TestDeleteJob(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantBody   string
+	}{
+		{"finished job deleted", nil, http.StatusNoContent, ""},
+		{"unknown job", job.ErrNotFound, http.StatusNotFound, "job not found"},
+		{"still active", runner.ErrJobActive, http.StatusConflict, "cancel it first"},
+		{"database busy", runner.ErrBusy, http.StatusServiceUnavailable, "try again later"},
+		{"other failure", errors.New("disk on fire"), http.StatusInternalServerError, "could not delete the job"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotID string
+			fr := &fakeRunner{del: func(_ context.Context, id string) error {
+				gotID = id
+				return tc.err
+			}}
+			h, _ := newTestServer(t, nil, fr)
+
+			rec := do(t, h, http.MethodDelete, "/api/v1/pipelines/a", "")
+			if rec.Code != tc.wantStatus || !strings.Contains(rec.Body.String(), tc.wantBody) {
+				t.Errorf("status %d body %q, want %d containing %q", rec.Code, rec.Body.String(), tc.wantStatus, tc.wantBody)
+			}
+			if gotID != "a" {
+				t.Errorf("runner got id %q", gotID)
+			}
+			if tc.wantStatus == http.StatusNoContent && rec.Body.Len() != 0 {
+				t.Errorf("204 must have no body, got %q", rec.Body.String())
+			}
+			if tc.wantStatus == http.StatusServiceUnavailable && rec.Header().Get("Retry-After") != "5" {
+				t.Error("503 without Retry-After")
+			}
+			if strings.Contains(rec.Body.String(), "disk on fire") {
+				t.Error("internal error leaked to the client")
+			}
+		})
+	}
+}
+
+func TestListPagination(t *testing.T) {
+	h, store := newTestServer(t, nil, &fakeRunner{})
+	start := time.Now().UTC()
+	for i := range 5 {
+		j := job.New(job.Spec{Name: "job"}, "")
+		j.ID = string(rune('a' + i))
+		j.CreatedAt = start.Add(time.Duration(i) * time.Second)
+		if err := store.Create(context.Background(), j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	type counts struct{ Count, Total, Limit, Offset int }
+	tests := []struct {
+		query string
+		want  string
+		page  counts
+	}{
+		{"", "edcba", counts{Count: 5, Total: 5, Limit: 50, Offset: 0}},
+		{"?limit=2", "ed", counts{Count: 2, Total: 5, Limit: 2, Offset: 0}},
+		{"?limit=2&offset=2", "cb", counts{Count: 2, Total: 5, Limit: 2, Offset: 2}},
+		{"?limit=2&offset=4", "a", counts{Count: 1, Total: 5, Limit: 2, Offset: 4}},
+		{"?offset=10", "", counts{Count: 0, Total: 5, Limit: 50, Offset: 10}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.query, func(t *testing.T) {
+			rec := do(t, h, http.MethodGet, "/api/v1/pipelines"+tc.query, "")
+			got := decode[struct {
+				Jobs []struct{ ID string }
+				counts
+			}](t, rec)
+			var ids string
+			for _, j := range got.Jobs {
+				ids += j.ID
+			}
+			if rec.Code != http.StatusOK || ids != tc.want {
+				t.Errorf("status %d ids %q, want %q", rec.Code, ids, tc.want)
+			}
+			if got.counts != tc.page {
+				t.Errorf("page = %+v, want %+v", got.counts, tc.page)
+			}
+		})
+	}
+
+	for _, q := range []string{"?limit=0", "?limit=501", "?limit=abc", "?offset=-1", "?offset=x"} {
+		if rec := do(t, h, http.MethodGet, "/api/v1/pipelines"+q, ""); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", q, rec.Code)
+		}
+	}
+}
+
 func TestJobErrors(t *testing.T) {
 	h, store := newTestServer(t, nil, &fakeRunner{})
 

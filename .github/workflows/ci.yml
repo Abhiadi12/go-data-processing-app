@@ -62,3 +62,27 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           go tool cover -func=coverage.out >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: build image
+        run: docker build -t datapipe:ci .
+
+      - name: smoke test
+        run: |
+          docker run -d --name datapipe -p 9090:9090 datapipe:ci
+          for i in $(seq 1 30); do
+            curl -fsS localhost:9090/healthz && break
+            sleep 1
+          done
+          curl -fsS localhost:9090/healthz
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:9090/api/v1/pipelines \
+            -H 'Content-Type: application/json' --data @examples/orders-job.json)
+          test "$code" = 202
+
+      - name: container logs
+        if: always()
+        run: docker logs datapipe || true

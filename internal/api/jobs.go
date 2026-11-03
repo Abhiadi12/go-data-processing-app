@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/Abhiadi12/go-data-processing-app/internal/job"
@@ -121,7 +123,32 @@ type jobSummary struct {
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 
+const (
+	defaultPageLimit = 50
+	maxPageLimit     = 500
+)
+
+type listResponse struct {
+	Jobs   []jobSummary `json:"jobs"`
+	Count  int          `json:"count"`
+	Total  int          `json:"total"`
+	Limit  int          `json:"limit"`
+	Offset int          `json:"offset"`
+}
+
 func (s *server) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, err := queryInt(q.Get("limit"), defaultPageLimit, 1, maxPageLimit)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("limit must be a whole number between 1 and %d", maxPageLimit))
+		return
+	}
+	offset, err := queryInt(q.Get("offset"), 0, 0, math.MaxInt32)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "offset must be a whole number, 0 or more")
+		return
+	}
+
 	jobs, err := s.store.List(r.Context())
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "list jobs", "err", err)
@@ -129,11 +156,24 @@ func (s *server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	out := make([]jobSummary, len(jobs))
-	for i, j := range jobs {
+	page := jobs[min(offset, len(jobs)):min(offset+limit, len(jobs))]
+	out := make([]jobSummary, len(page))
+	for i, j := range page {
 		out[i] = jobSummary{ID: j.ID, Name: j.Name, Status: j.Status, CreatedAt: j.CreatedAt, StartedAt: j.StartedAt, FinishedAt: j.FinishedAt}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"jobs": out, "count": len(out)})
+	writeJSON(w, http.StatusOK, listResponse{Jobs: out, Count: len(out), Total: len(jobs), Limit: limit, Offset: offset})
+}
+
+// queryInt parses an optional query parameter, returning def when it is empty.
+func queryInt(raw string, def, lo, hi int) (int, error) {
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < lo || n > hi {
+		return 0, errors.New("out of range")
+	}
+	return n, nil
 }
 
 func (s *server) handleGetJob(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +203,26 @@ func (s *server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, j)
 	default:
 		writeJSON(w, http.StatusAccepted, j)
+	}
+}
+
+func (s *server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	err := s.runner.Delete(r.Context(), id)
+	switch {
+	case err == nil:
+		s.logger.InfoContext(logging.WithJobID(r.Context(), id), "job deleted")
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, job.ErrNotFound):
+		writeError(w, http.StatusNotFound, "job not found")
+	case errors.Is(err, runner.ErrJobActive):
+		writeError(w, http.StatusConflict, "job is still pending or running; cancel it first")
+	case errors.Is(err, runner.ErrBusy):
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "the database is busy with another job, try again later")
+	default:
+		s.logger.ErrorContext(r.Context(), "delete job", "job_id", id, "err", err)
+		writeError(w, http.StatusInternalServerError, "could not delete the job")
 	}
 }
 
