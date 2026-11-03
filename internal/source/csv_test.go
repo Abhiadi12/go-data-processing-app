@@ -9,15 +9,15 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"testing/fstest"
 )
 
-func writeFile(t *testing.T, name, content string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
+func newCSV(name, content string) *CSVSource {
+	return NewCSV(name, fstest.MapFS{"in.csv": {Data: []byte(content)}}, "in.csv")
+}
+
+func newJSON(name, content string) *JSONSource {
+	return NewJSON(name, fstest.MapFS{"in.json": {Data: []byte(content)}}, "in.json", "")
 }
 
 func readAll(t *testing.T, src Source) ([]Item, error) {
@@ -45,7 +45,7 @@ func TestCSVHeaderErrors(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := readAll(t, NewCSV("test", writeFile(t, "in.csv", tc.content)))
+			_, err := readAll(t, newCSV("test", tc.content))
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tc.wantErr)
 			}
@@ -54,14 +54,14 @@ func TestCSVHeaderErrors(t *testing.T) {
 }
 
 func TestCSVMissingFile(t *testing.T) {
-	_, err := readAll(t, NewCSV("test", "does/not/exist.csv"))
+	_, err := readAll(t, NewCSV("test", fstest.MapFS{}, "does/not/exist.csv"))
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("err = %v, want fs.ErrNotExist", err)
 	}
 }
 
 func TestCSVHeaderOnly(t *testing.T) {
-	items, err := readAll(t, NewCSV("test", writeFile(t, "in.csv", "id,amount\n")))
+	items, err := readAll(t, newCSV("test", "id,amount\n"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestCSVReadsRows(t *testing.T) {
 		"3,Mei,7,extra\n" +
 		"4,Tom,3\n"
 
-	items, err := readAll(t, NewCSV("orders", writeFile(t, "in.csv", content)))
+	items, err := readAll(t, newCSV("orders", content))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestCSVBadQuoteIsRowError(t *testing.T) {
 		"1,\"Asha\"Rao\n" +
 		"2,Ravi\n"
 
-	items, err := readAll(t, NewCSV("orders", writeFile(t, "in.csv", content)))
+	items, err := readAll(t, newCSV("orders", content))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -137,12 +137,12 @@ func TestCSVBadQuoteIsRowError(t *testing.T) {
 }
 
 func TestCSVStopsWhenCancelled(t *testing.T) {
-	path := writeFile(t, "in.csv", "id\n1\n2\n3\n")
+	src := newCSV("orders", "id\n1\n2\n3\n")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	var got int
-	err := NewCSV("orders", path).Read(ctx, func(Item) error {
+	err := src.Read(ctx, func(Item) error {
 		got++
 		cancel()
 		return nil
@@ -157,11 +157,11 @@ func TestCSVStopsWhenCancelled(t *testing.T) {
 }
 
 func TestCSVStopsWhenEmitFails(t *testing.T) {
-	path := writeFile(t, "in.csv", "id\n1\n2\n3\n")
+	src := newCSV("orders", "id\n1\n2\n3\n")
 	errStop := errors.New("stop")
 
 	var got int
-	err := NewCSV("orders", path).Read(context.Background(), func(Item) error {
+	err := src.Read(context.Background(), func(Item) error {
 		got++
 		return errStop
 	})
@@ -175,8 +175,8 @@ func TestCSVStopsWhenEmitFails(t *testing.T) {
 }
 
 func TestCSVSampleFile(t *testing.T) {
-	path := filepath.Join("..", "..", "testdata", "orders.csv")
-	items, err := readAll(t, NewCSV("orders-csv", path))
+	files := os.DirFS(filepath.Join("..", "..", "testdata"))
+	items, err := readAll(t, NewCSV("orders-csv", files, "orders.csv"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
