@@ -34,6 +34,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.JobTTL != 24*time.Hour || cfg.APIKey != "" || cfg.CORSOrigins != nil {
 		t.Errorf("got ttl %v api key %q cors %v", cfg.JobTTL, cfg.APIKey, cfg.CORSOrigins)
 	}
+	if cfg.RateLimitPerSecond != 10 || cfg.RateLimitBurst != 20 {
+		t.Errorf("got rate limit %d/s burst %d", cfg.RateLimitPerSecond, cfg.RateLimitBurst)
+	}
 }
 
 func TestLoadSecuritySettings(t *testing.T) {
@@ -91,9 +94,14 @@ func TestLoadOverrides(t *testing.T) {
 		"WRITE_TIMEOUT":         "1m",
 		"JOB_WORKERS":           "8",
 		"ALLOW_PRIVATE_SOURCES": "true",
+		"RATE_LIMIT_PER_SECOND": "0",
+		"RATE_LIMIT_BURST":      "5",
 	}))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.RateLimitPerSecond != 0 || cfg.RateLimitBurst != 5 {
+		t.Errorf("got rate limit %d/s burst %d, want 0 (off) and 5", cfg.RateLimitPerSecond, cfg.RateLimitBurst)
 	}
 	if cfg.Port != "8081" || cfg.LogLevel != slog.LevelDebug || cfg.LogFormat != "text" {
 		t.Errorf("got port %q level %v format %q", cfg.Port, cfg.LogLevel, cfg.LogFormat)
@@ -114,11 +122,13 @@ func TestLoadReportsEveryProblem(t *testing.T) {
 		"ALLOW_PRIVATE_SOURCES": "maybe",
 		"JOB_WORKERS":           "0",
 		"JOB_QUEUE_SIZE":        "lots",
+		"RATE_LIMIT_PER_SECOND": "-1",
+		"RATE_LIMIT_BURST":      "0",
 	}))
 	if err == nil {
 		t.Fatal("want an error, got nil")
 	}
-	for _, key := range []string{"PORT", "LOG_LEVEL", "LOG_FORMAT", "DATA_DIR", "MAX_BODY_BYTES", "READ_TIMEOUT", "ALLOW_PRIVATE_SOURCES", "JOB_WORKERS", "JOB_QUEUE_SIZE"} {
+	for _, key := range []string{"PORT", "LOG_LEVEL", "LOG_FORMAT", "DATA_DIR", "MAX_BODY_BYTES", "READ_TIMEOUT", "ALLOW_PRIVATE_SOURCES", "JOB_WORKERS", "JOB_QUEUE_SIZE", "RATE_LIMIT_PER_SECOND", "RATE_LIMIT_BURST"} {
 		if !strings.Contains(err.Error(), key+"=") {
 			t.Errorf("error does not mention %s:\n%v", key, err)
 		}

@@ -27,8 +27,6 @@ type JSONSource struct {
 	recordsPath string
 }
 
-// NewJSON reads path from files. recordsPath names the top-level key holding
-// the array when the document is an object; empty means the document is the array.
 func NewJSON(name string, files fs.FS, path, recordsPath string) *JSONSource {
 	return &JSONSource{name: name, files: files, path: path, recordsPath: recordsPath}
 }

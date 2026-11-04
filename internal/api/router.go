@@ -23,6 +23,10 @@ type Options struct {
 	APIKey string
 	// CORSOrigins are the browser origins allowed to call the API ("*" for any).
 	CORSOrigins []string
+	// RateLimitPerSecond and RateLimitBurst limit /api/ requests per client IP.
+	// 0 requests per second turns the limit off.
+	RateLimitPerSecond int
+	RateLimitBurst     int
 }
 
 type server struct {
@@ -56,6 +60,7 @@ func NewHandler(opts Options) http.Handler {
 		recoverPanic(opts.Logger),
 		securityHeaders,
 		cors(opts.CORSOrigins),
+		rateLimit(opts.RateLimitPerSecond, opts.RateLimitBurst),
 		requireAPIKey(opts.APIKey),
 		limitBody(opts.MaxBodyBytes),
 	)

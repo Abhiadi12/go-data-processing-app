@@ -281,6 +281,10 @@ func (r *Runner) run(id string) {
 	stopProgress()
 
 	status, msg := outcome(runErr, timeout)
+	var pe *pipeline.PanicError
+	if errors.As(runErr, &pe) {
+		r.logger.ErrorContext(ctx, "job panicked", "stage", pe.Stage, "panic", pe.Value, "stack", string(pe.Stack))
+	}
 	failed, _ := errs.Snapshot()
 	slices.SortFunc(failed, func(a, b job.RecordError) int {
 		return cmp.Or(cmp.Compare(a.Source, b.Source), cmp.Compare(a.Index, b.Index))
@@ -320,28 +324,40 @@ type result struct {
 
 // execute runs the pipeline with the job's exports open, then commits them.
 // Any failure (or cancel) aborts the exports, so no partial output is left.
-func (r *Runner) execute(ctx context.Context, j job.Job, c *pipeline.Counters, errs *pipeline.Errors) (result, error) {
+// A panic here (outside the pipeline's own goroutines, which recover their
+// own) fails this job instead of crashing the server.
+func (r *Runner) execute(ctx context.Context, j job.Job, c *pipeline.Counters, errs *pipeline.Errors) (res result, err error) {
+	var set *export.Set
+	defer func() {
+		if v := recover(); v != nil {
+			if set != nil {
+				set.Abort()
+			}
+			res, err = result{}, pipeline.NewPanicError("job", v)
+		}
+	}()
+
 	srcs, err := job.BuildSources(j.Spec.Sources, r.deps)
 	if err != nil {
 		return result{}, err
 	}
 
-	set, err := export.Open(ctx, j, r.exports)
+	set, err = export.Open(ctx, j, r.exports)
 	if err != nil {
 		return result{}, fmt.Errorf("%w: %w", pipeline.ErrExportFailed, err)
 	}
 
-	res, err := pipeline.Run(ctx, j.Spec, srcs, set, c, errs)
+	out, err := pipeline.Run(ctx, j.Spec, srcs, set, c, errs)
 	if err != nil {
 		set.Abort()
 		return result{}, err
 	}
 
-	outputs, err := set.Commit(ctx, res.Aggregates)
+	outputs, err := set.Commit(ctx, out.Aggregates)
 	if err != nil {
 		return result{}, fmt.Errorf("%w: %w", pipeline.ErrExportFailed, err)
 	}
-	return result{Result: res, Outputs: outputs}, nil
+	return result{Result: out, Outputs: outputs}, nil
 }
 
 func (r *Runner) reportProgress(ctx context.Context, id string, c *pipeline.Counters) func() {

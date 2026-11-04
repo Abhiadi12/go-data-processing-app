@@ -58,6 +58,11 @@ func TestMemoryStore(t *testing.T) {
 	if list[0].ID != second.ID {
 		t.Error("list is not newest first")
 	}
+
+	seen := map[string]bool{}
+	if err := s.Walk(ctx, func(j Job) { seen[j.ID] = true }); err != nil || len(seen) != 2 || !seen[first.ID] || !seen[second.ID] {
+		t.Errorf("walk saw %v, %v; want both jobs", seen, err)
+	}
 }
 
 func TestMemoryStoreConcurrentUse(t *testing.T) {
@@ -74,6 +79,7 @@ func TestMemoryStoreConcurrentUse(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			_, _ = s.List(ctx)
+			_ = s.Walk(ctx, func(Job) {})
 		}()
 	}
 	wg.Wait()

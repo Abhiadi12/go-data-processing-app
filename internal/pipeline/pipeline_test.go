@@ -268,7 +268,7 @@ func TestStageUsesAllWorkers(t *testing.T) {
 		return r, nil
 	}
 
-	out := runStage(context.Background(), "test", workers, 1, in, fn, &StageTimer{}, &Counters{}, NewErrors(1))
+	out := runStage(context.Background(), func(error) {}, "test", workers, 1, in, fn, &StageTimer{}, &Counters{}, NewErrors(1))
 	var n int
 	for range out {
 		n++
@@ -295,7 +295,7 @@ func TestStageDropsRejectedRecords(t *testing.T) {
 	}
 
 	var got []int
-	for r := range runStage(context.Background(), "check", 2, 1, in, evenOnly, &StageTimer{}, &c, errs) {
+	for r := range runStage(context.Background(), func(error) {}, "check", 2, 1, in, evenOnly, &StageTimer{}, &c, errs) {
 		got = append(got, r.Index)
 	}
 	if !slices.Equal(got, []int{2}) || c.Failed.Load() != 2 {
@@ -340,6 +340,82 @@ func TestRunStopsWhenExportFails(t *testing.T) {
 		t.Fatalf("err = %v, want ErrExportFailed with the cause", err)
 	}
 	waitClosed(t, stopped, "the source")
+}
+
+type panicWriter struct{}
+
+func (panicWriter) WriteRecord(record.Record) error { panic("writer bug") }
+
+func TestRunRecoversPanics(t *testing.T) {
+	panicking := fakeSource{name: "boom", read: func(context.Context, source.Emit) error {
+		panic("bug in a source")
+	}}
+
+	tests := []struct {
+		name      string
+		src       func(stopped chan struct{}) []source.Source
+		w         RecordWriter
+		wantStage string
+	}{
+		{
+			name: "in a source",
+			src: func(stopped chan struct{}) []source.Source {
+				return []source.Source{endless("big", stopped), panicking}
+			},
+			wantStage: "source boom",
+		},
+		{
+			name:      "in the sink",
+			src:       func(stopped chan struct{}) []source.Source { return []source.Source{endless("big", stopped)} },
+			w:         panicWriter{},
+			wantStage: "sink",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stopped := make(chan struct{})
+			_, err := Run(context.Background(), simpleSpec(), tt.src(stopped), tt.w, &Counters{}, NewErrors(10))
+
+			var pe *PanicError
+			if !errors.As(err, &pe) || pe.Stage != tt.wantStage {
+				t.Fatalf("err = %v, want a PanicError in %q", err, tt.wantStage)
+			}
+			if len(pe.Stack) == 0 {
+				t.Error("the panic's stack trace was not kept")
+			}
+			waitClosed(t, stopped, "the other source")
+		})
+	}
+}
+
+func TestStageRecoversPanic(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+
+	in := make(chan record.Record, 10)
+	for i := range 10 {
+		in <- record.New("src", i)
+	}
+	close(in)
+	// Record 0 divides by zero: a real runtime panic, like a bug in a transform.
+	divide := func(r record.Record) (record.Record, []string) {
+		r.Fields["x"] = 100 / r.Index
+		return r, nil
+	}
+
+	out := runStage(ctx, cancel, "transform", 3, 1, in, divide, &StageTimer{}, &Counters{}, NewErrors(1))
+	done := make(chan struct{})
+	go func() {
+		for range out {
+		}
+		close(done)
+	}()
+	waitClosed(t, done, "the stage")
+
+	var pe *PanicError
+	if err := context.Cause(ctx); !errors.As(err, &pe) || pe.Stage != "transform" || !strings.Contains(pe.Error(), "divide by zero") {
+		t.Fatalf("cause = %v, want a PanicError in transform", err)
+	}
 }
 
 func TestRunRecordsStageLatencies(t *testing.T) {

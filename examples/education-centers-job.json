@@ -1,0 +1,245 @@
+{
+  "name": "education-centers",
+  "sources": [
+    {
+      "name": "centers-csv",
+      "type": "csv",
+      "path": "testdata/education_centers.csv"
+    }
+  ],
+  "schema": {
+    "fields": [
+      {
+        "name": "center_id",
+        "type": "int",
+        "required": true,
+        "min": 1
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": true,
+        "max": 100
+      },
+      {
+        "name": "city",
+        "type": "string",
+        "required": true
+      },
+      {
+        "name": "state",
+        "type": "string",
+        "required": true,
+        "pattern": "^[A-Za-z]{2}$"
+      },
+      {
+        "name": "center_type",
+        "type": "string",
+        "required": true,
+        "allowed": [
+          "school",
+          "college",
+          "coaching",
+          "university",
+          "vocational"
+        ]
+      },
+      {
+        "name": "students",
+        "type": "int",
+        "required": true,
+        "min": 0
+      },
+      {
+        "name": "teachers",
+        "type": "int",
+        "required": true,
+        "min": 1
+      },
+      {
+        "name": "annual_fee",
+        "type": "float",
+        "required": true,
+        "min": 0
+      },
+      {
+        "name": "rating",
+        "type": "float",
+        "required": true,
+        "min": 0,
+        "max": 5
+      },
+      {
+        "name": "established",
+        "type": "date",
+        "required": true,
+        "format": "2006-01-02"
+      },
+      {
+        "name": "accredited",
+        "type": "bool",
+        "required": true
+      }
+    ],
+    "unknown_fields": "drop"
+  },
+  "transforms": [
+    {
+      "op": "trim",
+      "fields": [
+        "name",
+        "city",
+        "center_type"
+      ]
+    },
+    {
+      "op": "title",
+      "fields": [
+        "name",
+        "city"
+      ]
+    },
+    {
+      "op": "uppercase",
+      "fields": [
+        "state"
+      ]
+    },
+    {
+      "op": "lowercase",
+      "fields": [
+        "center_type"
+      ]
+    },
+    {
+      "op": "multiply",
+      "fields": [
+        "students",
+        "annual_fee"
+      ],
+      "target": "fee_revenue"
+    },
+    {
+      "op": "lookup",
+      "field": "state",
+      "target": "zone",
+      "table": {
+        "DL": "North",
+        "UP": "North",
+        "PB": "North",
+        "RJ": "North",
+        "MH": "West",
+        "GJ": "West",
+        "KA": "South",
+        "TN": "South",
+        "TS": "South",
+        "KL": "South",
+        "WB": "East",
+        "OD": "East",
+        "BR": "East"
+      },
+      "default": "OTHER"
+    }
+  ],
+  "aggregations": [
+    {
+      "name": "by_type",
+      "group_by": [
+        "center_type"
+      ],
+      "metrics": [
+        {
+          "op": "count"
+        },
+        {
+          "op": "sum",
+          "field": "students"
+        },
+        {
+          "op": "avg",
+          "field": "rating"
+        },
+        {
+          "op": "avg",
+          "field": "annual_fee"
+        },
+        {
+          "op": "max",
+          "field": "students"
+        }
+      ]
+    },
+    {
+      "name": "by_zone",
+      "group_by": [
+        "zone"
+      ],
+      "metrics": [
+        {
+          "op": "count"
+        },
+        {
+          "op": "sum",
+          "field": "students"
+        },
+        {
+          "op": "sum",
+          "field": "fee_revenue"
+        }
+      ]
+    },
+    {
+      "name": "by_state",
+      "group_by": [
+        "state"
+      ],
+      "metrics": [
+        {
+          "op": "count"
+        },
+        {
+          "op": "avg",
+          "field": "rating"
+        }
+      ]
+    },
+    {
+      "name": "by_accreditation",
+      "group_by": [
+        "accredited"
+      ],
+      "metrics": [
+        {
+          "op": "count"
+        },
+        {
+          "op": "avg",
+          "field": "rating"
+        }
+      ]
+    },
+    {
+      "name": "overall",
+      "group_by": [],
+      "metrics": [
+        {
+          "op": "count"
+        },
+        {
+          "op": "sum",
+          "field": "students"
+        }
+      ]
+    }
+  ],
+  "exports": [
+    {
+      "type": "sqlite",
+      "content": "records"
+    },
+    {
+      "type": "sqlite",
+      "content": "aggregates"
+    }
+  ]
+}
