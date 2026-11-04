@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -182,6 +183,38 @@ func TestRunnerFailsWhenSourceFails(t *testing.T) {
 	}
 	if j.Progress.SourceErrors != 1 {
 		t.Errorf("source errors = %d", j.Progress.SourceErrors)
+	}
+}
+
+// panicFS panics when boom.csv is opened, like a bug inside a source.
+type panicFS struct{ fstest.MapFS }
+
+func (f panicFS) Open(name string) (fs.File, error) {
+	if name == "boom.csv" {
+		panic("bug in a source")
+	}
+	return f.MapFS.Open(name)
+}
+
+func TestRunnerSurvivesPanicInJob(t *testing.T) {
+	deps := job.SourceDeps{Files: panicFS{fstest.MapFS{"good.json": {Data: []byte(`[{"id":1},{"id":2}]`)}}}}
+	s := newSetup(t, 1, 10, deps)
+	spec := func(typ, path string) job.Spec {
+		return job.Spec{
+			Sources: []job.SourceSpec{{Name: "file", Type: typ, Path: path}},
+			Schema:  job.Schema{Fields: []job.Field{{Name: "id", Type: "int"}}},
+		}
+	}
+
+	bad := s.waitFor(t, s.submit(t, spec("csv", "boom.csv")), finished)
+	if bad.Status != job.StatusFailed || bad.Error != "internal error in source file: bug in a source" {
+		t.Errorf("panicking job: status %s error %q", bad.Status, bad.Error)
+	}
+
+	// The same worker goroutine must still be alive to run the next job.
+	good := s.waitFor(t, s.submit(t, spec("json", "good.json")), finished)
+	if good.Status != job.StatusCompleted || good.Progress.RecordsValid != 2 {
+		t.Errorf("next job: status %s progress %+v", good.Status, good.Progress)
 	}
 }
 

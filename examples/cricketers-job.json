@@ -1,0 +1,230 @@
+{
+  "name": "cricketers",
+  "sources": [
+    {
+      "name": "players-json",
+      "type": "json",
+      "path": "testdata/cricketers.json",
+      "records_path": "players"
+    }
+  ],
+  "schema": {
+    "fields": [
+      {
+        "name": "player_id",
+        "type": "int",
+        "required": true,
+        "min": 1
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "required": true,
+        "max": 80
+      },
+      {
+        "name": "country",
+        "type": "string",
+        "required": true,
+        "allowed": [
+          "india",
+          "australia",
+          "england",
+          "south africa",
+          "new zealand",
+          "pakistan",
+          "sri lanka",
+          "west indies",
+          "bangladesh",
+          "afghanistan"
+        ]
+      },
+      {
+        "name": "role",
+        "type": "string",
+        "required": true,
+        "allowed": [
+          "batter",
+          "bowler",
+          "all-rounder",
+          "wicket-keeper"
+        ]
+      },
+      {
+        "name": "matches",
+        "type": "int",
+        "required": true,
+        "min": 1
+      },
+      {
+        "name": "runs",
+        "type": "int",
+        "required": true,
+        "min": 0
+      },
+      {
+        "name": "wickets",
+        "type": "int",
+        "required": true,
+        "min": 0
+      },
+      {
+        "name": "batting_avg",
+        "type": "float",
+        "required": true,
+        "min": 0,
+        "max": 100
+      },
+      {
+        "name": "strike_rate",
+        "type": "float",
+        "required": true,
+        "min": 0,
+        "max": 300
+      },
+      {
+        "name": "debut_date",
+        "type": "date",
+        "required": true,
+        "format": "2006-01-02"
+      },
+      {
+        "name": "active",
+        "type": "bool",
+        "required": true
+      }
+    ],
+    "unknown_fields": "drop"
+  },
+  "transforms": [
+    {
+      "op": "trim",
+      "fields": [
+        "name",
+        "country",
+        "role"
+      ]
+    },
+    {
+      "op": "title",
+      "fields": [
+        "name",
+        "country"
+      ]
+    },
+    {
+      "op": "lowercase",
+      "fields": [
+        "role"
+      ]
+    },
+    {
+      "op": "lookup",
+      "field": "country",
+      "target": "region",
+      "table": {
+        "India": "Asia",
+        "Pakistan": "Asia",
+        "Sri Lanka": "Asia",
+        "Bangladesh": "Asia",
+        "Afghanistan": "Asia",
+        "Australia": "Oceania",
+        "New Zealand": "Oceania",
+        "England": "Europe",
+        "South Africa": "Africa",
+        "West Indies": "Americas"
+      },
+      "default": "OTHER"
+    }
+  ],
+  "aggregations": [
+    {
+      "name": "by_country",
+      "group_by": [
+        "country"
+      ],
+      "metrics": [
+        {
+          "op": "count"
+        },
+        {
+          "op": "sum",
+          "field": "runs"
+        },
+        {
+          "op": "sum",
+          "field": "wickets"
+        },
+        {
+          "op": "avg",
+          "field": "batting_avg"
+        },
+        {
+          "op": "max",
+          "field": "runs"
+        }
+      ]
+    },
+    {
+      "name": "by_role",
+      "group_by": [
+        "role"
+      ],
+      "metrics": [
+        {
+          "op": "count"
+        },
+        {
+          "op": "avg",
+          "field": "strike_rate"
+        },
+        {
+          "op": "sum",
+          "field": "wickets"
+        }
+      ]
+    },
+    {
+      "name": "by_region",
+      "group_by": [
+        "region"
+      ],
+      "metrics": [
+        {
+          "op": "count"
+        },
+        {
+          "op": "sum",
+          "field": "runs"
+        }
+      ]
+    },
+    {
+      "name": "overall",
+      "group_by": [],
+      "metrics": [
+        {
+          "op": "count"
+        },
+        {
+          "op": "sum",
+          "field": "runs"
+        },
+        {
+          "op": "sum",
+          "field": "wickets"
+        }
+      ]
+    }
+  ],
+  "exports": [
+    {
+      "type": "sqlite",
+      "content": "records"
+    },
+    {
+      "type": "sqlite",
+      "content": "aggregates"
+    }
+  ]
+}

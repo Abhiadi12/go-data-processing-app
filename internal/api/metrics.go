@@ -30,15 +30,15 @@ type metricsResponse struct {
 }
 
 func (s *server) handleMetrics(w http.ResponseWriter, r *http.Request) {
-	jobs, err := s.store.List(r.Context())
-	if err != nil {
-		s.logger.ErrorContext(r.Context(), "list jobs for metrics", "err", err)
+	now := time.Now()
+	sum := metrics.NewSummarizer(now)
+	if err := s.store.Walk(r.Context(), sum.Add); err != nil {
+		s.logger.ErrorContext(r.Context(), "read jobs for metrics", "err", err)
 		writeError(w, http.StatusInternalServerError, "could not read jobs")
 		return
 	}
-	now := time.Now()
 	writeJSON(w, http.StatusOK, metricsResponse{
-		Summary:       metrics.Summarize(jobs, now),
+		Summary:       sum.Summary(),
 		UptimeSeconds: now.Sub(s.started).Round(time.Second).Seconds(),
 		Goroutines:    runtime.NumGoroutine(),
 	})

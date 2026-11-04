@@ -81,8 +81,9 @@ Every request passes through this middleware chain, outermost first. The order i
 | 3 | `recoverPanic` | Turns a handler panic into a logged stack trace and a plain `500`. |
 | 4 | `securityHeaders` | Before any early return, so `401`s and preflights carry the headers too. |
 | 5 | `cors` | Before the API key, because browsers send preflight `OPTIONS` without custom headers. |
-| 6 | `requireAPIKey` | `/api/` routes only. Compares SHA-256 hashes with `subtle.ConstantTimeCompare`. |
-| 7 | `limitBody` | `http.MaxBytesReader`, so an oversized body becomes a `413`. |
+| 6 | `rateLimit` | `/api/` routes only. A token bucket per client IP (`RATE_LIMIT_PER_SECOND`, `RATE_LIMIT_BURST`) returns `429` with `Retry-After`. After `cors`, so preflights are not counted; before the API key, so guessing keys is limited too. |
+| 7 | `requireAPIKey` | `/api/` routes only. Compares SHA-256 hashes with `subtle.ConstantTimeCompare`. |
+| 8 | `limitBody` | `http.MaxBytesReader`, so an oversized body becomes a `413`. |
 
 `POST /api/v1/pipelines` then does all of its work before anything runs:
 
@@ -196,6 +197,7 @@ Errors are split by blast radius:
 | Source error | file missing, HTTP 500, response too large | Fails the job, or is recorded and skipped with `continue_on_source_error: true`. |
 | Export error | disk full, SQLite failure | Fails the job, and all exports are rolled back. |
 | Panic in a handler | a bug | Recovered: logged with the stack and request ID, and the client gets `500`. |
+| Panic in a job | a bug in a source, stage, sink or export | Recovered in the goroutine that panicked (`recover` only works there), which cancels the job like any other failure. The job ends `failed` with `internal error in <stage>: <panic>`, the stack is logged, and the server and other jobs keep running. |
 
 Failed records are **bounded**: the first `max_stored_errors` (default 1000) are kept, sorted by source and index, while `records_failed` is always the full count. A file full of bad rows cannot exhaust memory.
 
@@ -233,13 +235,14 @@ A consequence of one connection and one transaction per job is that **jobs that 
 | Slow clients (Slowloris) | `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`, `IdleTimeout` on the server. A tuned HTTP client is used for sources. |
 | Unauthorised use | Optional `API_KEY` (16+ characters) on all `/api/` routes, compared in constant time. Docs and health stay public. |
 | Browser attacks | `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, CSP `default-src 'none'` and `no-store` on every response. `/docs` gets its own CSP with a script hash, and Swagger UI is loaded at a pinned version with SRI hashes. |
+| Request floods | A token bucket per client IP on `/api/` routes answers `429` with `Retry-After`. `X-Forwarded-For` is not trusted (any client can set it), so behind a proxy all clients share its IP and the proxy should do the limiting. |
 | Cross-origin access | CORS is off by default. When enabled, it applies only to the listed origins and sends `Vary: Origin`. |
 | Container | Distroless static image (no shell, no package manager), non-root user. The data volume is the only state. |
 
 ## 10. Observability
 
 - **Logs:** `log/slog`, JSON by default, written to stdout (12-factor; the platform collects them). A custom handler adds `request_id` and `job_id` from the context to every line, and the request ID is saved on the job. One `grep` for the request ID therefore shows the API call and the whole job run.
-- **Metrics:** `GET /api/v1/metrics` (jobs by status, record totals, error rate, throughput, average and max latency per stage, goroutines) and `GET /api/v1/pipelines/{id}/progress`. Both are computed from the store on request, so there is no second source of truth to keep in sync.
+- **Metrics:** `GET /api/v1/metrics` (jobs by status, record totals, error rate, throughput, average and max latency per stage, goroutines) and `GET /api/v1/pipelines/{id}/progress`. Both are computed from the store on request, so there is no second source of truth to keep in sync. The summary walks the store once under its read lock (`Store.Walk`), without copying or sorting the jobs.
 - **Health:** `GET /healthz` for liveness and readiness probes. The distroless image has no shell for a `HEALTHCHECK`, so the orchestrator probes the endpoint instead.
 
 ## 11. Performance
@@ -280,4 +283,4 @@ Where time goes, and the next optimisations:
 1. **Durable job state:** a SQLite or Postgres implementation of `job.Store`, plus a startup step that marks jobs left `running` as `failed: interrupted`.
 2. **Several instances:** move the queue to RabbitMQ or Redis Streams, and broadcast cancel requests (pub/sub), because today the cancel function lives in the process running the job. Exports would move to Postgres or object storage.
 3. **Monitoring:** a Prometheus endpoint with histograms, Go runtime metrics, alert rules (job failure rate, queue saturation) and a dashboard. OpenTelemetry tracing across the API and the job.
-4. **Resilience:** panic recovery inside job goroutines (fail that job, not the process), and log rotation where logs are written to files.
+4. **Resilience:** log rotation where logs are written to files, and a shared rate limiter (for example in Redis) once there are several instances.

@@ -1,7 +1,3 @@
-// Package export writes a job's processed records and aggregates to CSV/JSON
-// files and SQLite. Output becomes visible only when the whole job succeeds:
-// files are written to temp names and renamed, SQLite rows are inserted in one
-// transaction. On failure or cancel everything is removed or rolled back.
 package export
 
 import (
@@ -24,8 +20,6 @@ var (
 	ErrNoDatabase  = errors.New("sqlite database is not configured")
 )
 
-// Deps are the shared resources: the root output directory and the SQLite
-// database (opened once at startup with OpenSQLite).
 type Deps struct {
 	OutputDir string
 	DB        *sql.DB
@@ -35,16 +29,11 @@ type Deps struct {
 // writers do their work in prepare.
 type writer interface {
 	write(rec record.Record) error
-	// prepare finishes everything that can fail (flush, sync, insert) without
-	// making the output visible yet.
 	prepare(ctx context.Context, aggs []job.AggregateResult) error
-	// publish makes the output visible (rename) and reports what was written.
 	publish() (job.Output, error)
 	abort()
 }
 
-// Set holds all of one job's writers. It is used by one goroutine (the
-// pipeline's sink, then the runner), so it needs no locks.
 type Set struct {
 	dir     string
 	writers []writer
@@ -52,9 +41,6 @@ type Set struct {
 	format  formatter
 }
 
-// Open creates the writers for every export in the job's spec. SQLite exports
-// share one transaction, begun here with ctx: if ctx is cancelled the
-// database/sql package rolls it back by itself.
 func Open(ctx context.Context, j job.Job, deps Deps) (*Set, error) {
 	s := &Set{format: newFormatter(j.Spec.Schema)}
 	columns := j.Spec.OutputFields()
@@ -121,7 +107,6 @@ func (s *Set) ensureDir(root, jobID string) error {
 	return nil
 }
 
-// WriteRecord sends one processed record to every records export.
 func (s *Set) WriteRecord(rec record.Record) error {
 	for _, w := range s.writers {
 		if err := w.write(rec); err != nil {
@@ -131,9 +116,6 @@ func (s *Set) WriteRecord(rec record.Record) error {
 	return nil
 }
 
-// Commit finishes every export and makes it visible. It works in two phases
-// so a failure leaves nothing behind: first everything that can fail
-// (flush, fsync, inserts), then the SQLite commit, then the file renames.
 func (s *Set) Commit(ctx context.Context, aggs []job.AggregateResult) ([]job.Output, error) {
 	for _, w := range s.writers {
 		if err := w.prepare(ctx, aggs); err != nil {
@@ -162,8 +144,6 @@ func (s *Set) Commit(ctx context.Context, aggs []job.AggregateResult) ([]job.Out
 	return outputs, nil
 }
 
-// Abort removes temp files, rolls back SQLite and removes the job's output
-// directory if nothing was published into it. It is safe to call twice.
 func (s *Set) Abort() {
 	for _, w := range s.writers {
 		w.abort()
@@ -177,9 +157,6 @@ func (s *Set) Abort() {
 	}
 }
 
-// Remove deletes everything a finished job exported: its SQLite rows first
-// (the step that can fail, for example when another job holds the database),
-// then its output directory. Running it twice is harmless.
 func Remove(ctx context.Context, j job.Job, deps Deps) error {
 	if j.Status == job.StatusCompleted && usesSQLite(j.Spec.Exports) {
 		if deps.DB == nil {

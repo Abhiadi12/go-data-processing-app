@@ -26,13 +26,6 @@ const batchSize = 500
 //go:embed migrations/*.sql
 var migrations embed.FS
 
-// OpenSQLite opens (creating if needed) the database at path and applies
-// pending migrations.
-//
-//   - WAL journal mode: readers do not block the writer.
-//   - busy_timeout 5000: wait up to 5 s for a lock instead of failing at once.
-//   - One open connection: SQLite allows a single writer, so database/sql
-//     queues callers instead of getting "database is locked" errors.
 func OpenSQLite(ctx context.Context, path string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, err
@@ -113,15 +106,11 @@ func applyMigration(ctx context.Context, db *sql.DB, version int, name, body str
 	return tx.Commit()
 }
 
-// insertRows inserts rows in chunks of batchSize using multi-row INSERTs:
-// INSERT INTO t (a, b) VALUES (?, ?), (?, ?), ...
-// table and columns are constants from this package, never user input.
 func insertRows(ctx context.Context, tx *sql.Tx, table string, columns []string, rows [][]any) error {
 	one := "(" + strings.TrimSuffix(strings.Repeat("?, ", len(columns)), ", ") + ")"
 	for start := 0; start < len(rows); start += batchSize {
 		chunk := rows[start:min(start+batchSize, len(rows))]
 
-		// Only identifiers are formatted in; every value is a bound ? parameter.
 		query := fmt.Sprintf("INSERT INTO %s (%s) VALUES %s", table, strings.Join(columns, ", "), //nolint:gosec // G201: table and columns are package constants
 			strings.TrimSuffix(strings.Repeat(one+", ", len(chunk)), ", "))
 		args := make([]any, 0, len(chunk)*len(columns))

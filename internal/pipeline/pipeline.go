@@ -44,28 +44,33 @@ func Run(ctx context.Context, spec job.Spec, sources []source.Source, w RecordWr
 
 	o := spec.Options
 	records := ingest(ctx, cancel, sources, o.BufferSize, o.ContinueOnSourceError, c, errs)
-	valid := runStage(ctx, "validate", o.ValidateWorkers, o.BufferSize, records, v.Validate, &c.Validate, c, errs)
-	transformed := runStage(ctx, "transform", o.TransformWorkers, o.BufferSize, valid, t.Transform, &c.Transform, c, errs)
+	valid := runStage(ctx, cancel, "validate", o.ValidateWorkers, o.BufferSize, records, v.Validate, &c.Validate, c, errs)
+	transformed := runStage(ctx, cancel, "transform", o.TransformWorkers, o.BufferSize, valid, t.Transform, &c.Transform, c, errs)
 
-	// The sink: this goroutine alone owns the aggregator and the writers, so
-	// neither needs a lock. A write error stops the whole run.
-	for rec := range transformed {
+	sink(cancel, transformed, w, agg, c)
+
+	if err := context.Cause(ctx); err != nil {
+		return Result{}, err
+	}
+	return Result{Aggregates: agg.Results()}, nil
+}
+
+// sink runs in Run's own goroutine: it alone owns the aggregator and the
+// writers, so neither needs a lock. A write error or a panic stops the run.
+func sink(fail context.CancelCauseFunc, in <-chan record.Record, w RecordWriter, agg *Aggregator, c *Counters) {
+	defer recoverTo(fail, "sink")
+	for rec := range in {
 		start := time.Now()
 		if w != nil {
 			if err := w.WriteRecord(rec); err != nil {
-				cancel(fmt.Errorf("%w: %w", ErrExportFailed, err))
-				break
+				fail(fmt.Errorf("%w: %w", ErrExportFailed, err))
+				return
 			}
 		}
 		agg.Add(rec)
 		c.Sink.Observe(time.Since(start))
 		c.Valid.Add(1)
 	}
-
-	if err := context.Cause(ctx); err != nil {
-		return Result{}, err
-	}
-	return Result{Aggregates: agg.Results()}, nil
 }
 
 func ingest(ctx context.Context, fail context.CancelCauseFunc, sources []source.Source,
@@ -78,6 +83,7 @@ func ingest(ctx context.Context, fail context.CancelCauseFunc, sources []source.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer recoverTo(fail, "source "+src.Name())
 
 			err := src.Read(ctx, func(it source.Item) error {
 				c.Read.Add(1)
@@ -112,7 +118,7 @@ func ingest(ctx context.Context, fail context.CancelCauseFunc, sources []source.
 	return out
 }
 
-func runStage(ctx context.Context, name string, workers, bufSize int, in <-chan record.Record,
+func runStage(ctx context.Context, fail context.CancelCauseFunc, name string, workers, bufSize int, in <-chan record.Record,
 	fn StageFunc, timer *StageTimer, c *Counters, errs *Errors,
 ) <-chan record.Record {
 	out := make(chan record.Record, bufSize)
@@ -122,6 +128,7 @@ func runStage(ctx context.Context, name string, workers, bufSize int, in <-chan 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer recoverTo(fail, name)
 			for {
 				var rec record.Record
 				var ok bool

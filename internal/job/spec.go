@@ -1,4 +1,3 @@
-// Package job holds the job specification, the job model and the job store.
 package job
 
 type Spec struct {

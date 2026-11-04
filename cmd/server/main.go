@@ -73,6 +73,9 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		MaxBodyBytes: cfg.MaxBodyBytes,
 		APIKey:       cfg.APIKey,
 		CORSOrigins:  cfg.CORSOrigins,
+
+		RateLimitPerSecond: cfg.RateLimitPerSecond,
+		RateLimitBurst:     cfg.RateLimitBurst,
 	})
 
 	srv := &http.Server{
@@ -93,7 +96,8 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		logger.Info("listening", "addr", srv.Addr, "data_dir", cfg.DataDir, "log_level", cfg.LogLevel.String(),
 			"job_workers", cfg.JobWorkers, "job_queue_size", cfg.JobQueueSize,
 			"output_dir", cfg.OutputDir, "sqlite_path", cfg.SQLitePath, "job_ttl", cfg.JobTTL.String(),
-			"api_key_required", cfg.APIKey != "", "cors_origins", cfg.CORSOrigins)
+			"api_key_required", cfg.APIKey != "", "cors_origins", cfg.CORSOrigins,
+			"rate_limit_per_second", cfg.RateLimitPerSecond, "rate_limit_burst", cfg.RateLimitBurst)
 		errCh <- srv.ListenAndServe()
 	}()
 

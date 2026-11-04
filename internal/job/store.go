@@ -24,6 +24,10 @@ type Store interface {
 	// If fn returns an error nothing is saved and that error is returned.
 	Update(ctx context.Context, id string, fn func(*Job) error) (Job, error)
 	Delete(ctx context.Context, id string) error
+	// Walk calls fn once per job, in no particular order, without copying the
+	// jobs into a list or sorting them. It is for summaries (GET /metrics);
+	// fn must be quick and must not call the store.
+	Walk(ctx context.Context, fn func(Job)) error
 }
 
 var _ Store = (*MemoryStore)(nil)
@@ -84,6 +88,16 @@ func (s *MemoryStore) Delete(_ context.Context, id string) error {
 		return ErrNotFound
 	}
 	delete(s.jobs, id)
+	return nil
+}
+
+func (s *MemoryStore) Walk(_ context.Context, fn func(Job)) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, j := range s.jobs {
+		fn(j)
+	}
 	return nil
 }
 

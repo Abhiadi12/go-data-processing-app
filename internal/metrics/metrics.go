@@ -68,55 +68,77 @@ type Summary struct {
 //   - records_per_second: records read / time spent running, over jobs that started
 //   - stages: per-stage latency over all jobs (average weighted by records, max of maxes)
 func Summarize(jobs []job.Job, now time.Time) Summary {
-	s := Summary{Jobs: map[job.Status]int{
-		job.StatusPending: 0, job.StatusRunning: 0, job.StatusCompleted: 0, job.StatusFailed: 0, job.StatusCancelled: 0,
-	}}
-
-	var runSeconds float64
-	stages := map[string]*job.StageStat{}
-	var order []string
-	var weighted = map[string]float64{}
-
+	z := NewSummarizer(now)
 	for _, j := range jobs {
-		s.Jobs[j.Status]++
-		s.Records.RecordsRead += j.Progress.RecordsRead
-		s.Records.RecordsValid += j.Progress.RecordsValid
-		s.Records.RecordsFailed += j.Progress.RecordsFailed
-		s.Records.SourceErrors += j.Progress.SourceErrors
+		z.Add(j)
+	}
+	return z.Summary()
+}
 
-		if j.StartedAt != nil {
-			end := now
-			if j.FinishedAt != nil {
-				end = *j.FinishedAt
-			}
-			runSeconds += end.Sub(*j.StartedAt).Seconds()
-		}
+// Summarizer builds a Summary one job at a time, so GET /metrics can feed it
+// straight from Store.Walk instead of copying and sorting every job first.
+type Summarizer struct {
+	now        time.Time
+	s          Summary
+	runSeconds float64
+	stages     map[string]*job.StageStat
+	order      []string
+	weighted   map[string]float64
+}
 
-		for _, st := range j.Stages {
-			agg, ok := stages[st.Stage]
-			if !ok {
-				agg = &job.StageStat{Stage: st.Stage}
-				stages[st.Stage] = agg
-				order = append(order, st.Stage)
-			}
-			agg.Records += st.Records
-			agg.MaxMicros = math.Max(agg.MaxMicros, st.MaxMicros)
-			weighted[st.Stage] += st.AvgMicros * float64(st.Records)
+func NewSummarizer(now time.Time) *Summarizer {
+	return &Summarizer{
+		now: now,
+		s: Summary{Jobs: map[job.Status]int{
+			job.StatusPending: 0, job.StatusRunning: 0, job.StatusCompleted: 0, job.StatusFailed: 0, job.StatusCancelled: 0,
+		}},
+		stages:   map[string]*job.StageStat{},
+		weighted: map[string]float64{},
+	}
+}
+
+func (z *Summarizer) Add(j job.Job) {
+	z.s.Jobs[j.Status]++
+	z.s.Records.RecordsRead += j.Progress.RecordsRead
+	z.s.Records.RecordsValid += j.Progress.RecordsValid
+	z.s.Records.RecordsFailed += j.Progress.RecordsFailed
+	z.s.Records.SourceErrors += j.Progress.SourceErrors
+
+	if j.StartedAt != nil {
+		end := z.now
+		if j.FinishedAt != nil {
+			end = *j.FinishedAt
 		}
+		z.runSeconds += end.Sub(*j.StartedAt).Seconds()
 	}
 
+	for _, st := range j.Stages {
+		agg, ok := z.stages[st.Stage]
+		if !ok {
+			agg = &job.StageStat{Stage: st.Stage}
+			z.stages[st.Stage] = agg
+			z.order = append(z.order, st.Stage)
+		}
+		agg.Records += st.Records
+		agg.MaxMicros = math.Max(agg.MaxMicros, st.MaxMicros)
+		z.weighted[st.Stage] += st.AvgMicros * float64(st.Records)
+	}
+}
+
+func (z *Summarizer) Summary() Summary {
+	s := z.s
 	if s.Records.RecordsRead > 0 {
 		s.ErrorRate = round4(float64(s.Records.RecordsFailed+s.Records.SourceErrors) / float64(s.Records.RecordsRead))
 	}
-	if runSeconds > 0 {
-		s.RecordsPerSecond = round2(float64(s.Records.RecordsRead) / runSeconds)
+	if z.runSeconds > 0 {
+		s.RecordsPerSecond = round2(float64(s.Records.RecordsRead) / z.runSeconds)
 	}
 
-	s.Stages = make([]job.StageStat, 0, len(order))
-	for _, name := range order {
-		st := *stages[name]
+	s.Stages = make([]job.StageStat, 0, len(z.order))
+	for _, name := range z.order {
+		st := *z.stages[name]
 		if st.Records > 0 {
-			st.AvgMicros = round2(weighted[name] / float64(st.Records))
+			st.AvgMicros = round2(z.weighted[name] / float64(st.Records))
 		}
 		s.Stages = append(s.Stages, st)
 	}

@@ -6,10 +6,10 @@ A concurrent data processing pipeline in Go, driven by a REST API. You submit a 
 
 - **Sources:** CSV, JSON file and HTTP (streamed, so input size does not grow memory).
 - **Stages:** ingest (fan-in) → validate (worker pool) → transform (worker pool) → aggregate + export (single sink goroutine), connected by bounded channels.
-- **Jobs:** bounded queue with a fixed pool of job workers. Cancel, per-job timeout, delete, TTL eviction and graceful shutdown.
+- **Jobs:** bounded queue with a fixed pool of job workers. Cancel, per-job timeout, delete, TTL eviction and graceful shutdown. A panic inside a job fails that job, not the server.
 - **Errors:** a bad record is dropped and reported with its reasons. It does not stop the job.
 - **Exports:** atomic JSON/CSV files and SQLite (WAL, versioned migrations, one transaction per job, batched inserts).
-- **Operations:** structured `slog` logs with request and job IDs, a JSON metrics endpoint, Swagger UI, optional API key, CORS, a Docker image (22 MB, distroless, non-root) and CI.
+- **Operations:** structured `slog` logs with request and job IDs, a JSON metrics endpoint, Swagger UI, optional API key, CORS, per-IP rate limiting, a Docker image (22 MB, distroless, non-root) and CI.
 - **Dependencies:** the standard library plus one module, `modernc.org/sqlite` (pure Go, so the binary builds with `CGO_ENABLED=0`).
 
 ## Contents
@@ -24,7 +24,6 @@ A concurrent data processing pipeline in Go, driven by a REST API. You submit a 
 - [Project layout](#project-layout)
 - [Development](#development)
 - [Design decisions](#design-decisions)
-- [Known gaps](#known-gaps)
 
 ## Architecture
 
@@ -142,6 +141,8 @@ All settings are environment variables, and every one has a default. [`.env.exam
 | `SQLITE_PATH` | `data/datapipe.db` | SQLite file, created and migrated at startup |
 | `API_KEY` | empty | If set (16+ characters), every `/api/` request needs `X-API-Key`. `/healthz`, `/docs` and `/openapi.json` stay public. |
 | `CORS_ALLOWED_ORIGINS` | empty | Comma-separated browser origins, or `*`. Empty means CORS is off. |
+| `RATE_LIMIT_PER_SECOND` | `10` | `/api/` requests per second allowed per client IP (0–10000). `0` turns the limit off. |
+| `RATE_LIMIT_BURST` | `20` | Requests a client may send at once before the per-second limit applies (1–10000) |
 
 ## Example requests
 
@@ -327,7 +328,7 @@ Base path `/api/v1`. Errors always have the shape `{"error": "...", "details": [
 | `GET /api/v1/metrics` | `200` | — |
 | `GET /docs`, `GET /openapi.json` | `200` | — |
 
-With `API_KEY` set, every `/api/` route also returns `401` when the key is missing or wrong. A wrong method returns `405` and an unknown path `404`.
+With `API_KEY` set, every `/api/` route also returns `401` when the key is missing or wrong. A client over the rate limit gets `429` with `Retry-After` on any `/api/` route. A wrong method returns `405` and an unknown path `404`.
 
 Every response carries `X-Request-ID`. A client-supplied ID is reused, otherwise one is generated. The ID is also saved on the job and appears in every log line for that request and that job.
 
@@ -391,7 +392,7 @@ gofmt -l .                        # must print nothing
 go vet ./...
 go test -race -count=1 ./...
 golangci-lint run ./...           # config in .golangci.yml
-git config core.hooksPath .githooks   # pre-commit (fmt, vet, tests) + Conventional Commits check
+./scripts/setup.sh               # once per clone: turns on the git hooks (fmt, vet, tests + Conventional Commits)
 ```
 
 CI (`.github/workflows/ci.yml`) runs on every pull request and every push to `main`:
@@ -409,6 +410,8 @@ The short version. [ARCHITECTURE.md](ARCHITECTURE.md) has the reasoning.
 - **Channels between stages, worker pools inside stages.** Bounded buffers give back-pressure: a slow exporter slows ingest instead of filling memory.
 - **One sink goroutine** owns aggregation and export, so neither needs a lock and export streams record by record (memory stays flat for large inputs).
 - **Bounded job queue** (a buffered channel plus a fixed number of workers). A full queue returns `503` instead of starting unlimited goroutines.
+- **Rate limiting before the queue.** A token bucket per client IP answers `429` early, so one client cannot flood the API until the queue is full. `/healthz` and the docs are not limited.
+- **A panic fails one job, not the server.** Every pipeline goroutine recovers its own panics and cancels the job with the stage and the panic value; the stack trace goes to the log.
 - **Jobs are detached from the HTTP request.** They run on the runner's own context with their own cancel and timeout, and only the request ID is carried over. Cancel, timeout and shutdown each carry a cause, so the job records why it stopped.
 - **Record errors are data, not failures.** A bad row is dropped and stored (bounded), while a broken source or export fails the job.
 - **Exports are all-or-nothing**: temp file + rename for files, one transaction per job for SQLite.

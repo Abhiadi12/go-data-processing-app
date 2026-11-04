@@ -37,6 +37,9 @@ type Config struct {
 
 	APIKey      string
 	CORSOrigins []string
+
+	RateLimitPerSecond int
+	RateLimitBurst     int
 }
 
 const minAPIKeyLength = 16
@@ -71,6 +74,9 @@ func Load(getenv func(string) string) (Config, error) {
 
 		APIKey:      l.str("API_KEY", ""),
 		CORSOrigins: l.origins("CORS_ALLOWED_ORIGINS"),
+
+		RateLimitPerSecond: l.between("RATE_LIMIT_PER_SECOND", 10, 0, 10000),
+		RateLimitBurst:     l.count("RATE_LIMIT_BURST", 20, 10000),
 	}
 
 	if cfg.APIKey != "" && len(cfg.APIKey) < minAPIKeyLength {
@@ -154,13 +160,17 @@ func (l *loader) bytes(key string, def int64) int64 {
 }
 
 func (l *loader) count(key string, def, maxValue int) int {
+	return l.between(key, def, 1, maxValue)
+}
+
+func (l *loader) between(key string, def, minValue, maxValue int) int {
 	v := l.str(key, "")
 	if v == "" {
 		return def
 	}
 	n, err := strconv.Atoi(v)
-	if err != nil || n < 1 || n > maxValue {
-		l.fail(key, v, fmt.Sprintf("must be a whole number between 1 and %d", maxValue))
+	if err != nil || n < minValue || n > maxValue {
+		l.fail(key, v, fmt.Sprintf("must be a whole number between %d and %d", minValue, maxValue))
 		return def
 	}
 	return n
